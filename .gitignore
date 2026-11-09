@@ -1,0 +1,9 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+
+# Never commit client data or saved audits
+tag-audit-*.json
+*.audit.json
+exports/

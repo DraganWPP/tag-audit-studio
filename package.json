@@ -1,0 +1,10 @@
+{
+  "name": "tag-audit-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Audit GTM, GA4 and cookie consent setups in the browser and produce a client-ready report.",
+  "scripts": {
+    "start": "npx --yes http-server . -p 8000 -c-1",
+    "check": "node --check js/engine.js && node --check js/engine-web.js && node --check js/google.js && node --check js/ai.js && node --check js/app.js"
+  }
+}
