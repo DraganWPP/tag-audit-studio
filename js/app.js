@@ -23,7 +23,7 @@ function saveDraft() {
   const i = STATE.inputs;
   try {
     localStorage.setItem(DRAFT_KEY, JSON.stringify({
-      client: i.client, site: i.site, publicIds: i.publicIds, apiIds: i.apiIds, ga4: i.ga4, rules: i.rules
+      client: i.client, site: i.site, publicIds: i.publicIds, apiIds: i.apiIds, apiTarget: i.apiTarget, ga4: i.ga4, rules: i.rules
     }));
   } catch (e) { /* ignore */ }
 }
@@ -35,7 +35,7 @@ function loadDraft() {
 
 const STATE = {
   view: 'audit',
-  inputs: Object.assign({ client: '', site: '', publicIds: '', apiIds: '', ga4: true, rules: {},
+  inputs: Object.assign({ client: '', site: '', publicIds: '', apiIds: '', apiTarget: 'live', ga4: true, rules: {},
                           exports: [], pageSource: '', live: null }, loadDraft() || {}),
   result: null,
   ai: { writeup: '', fixplan: '', chat: [], busy: '' },
@@ -44,6 +44,7 @@ const STATE = {
   caches: { containers: {}, api: {}, ga4: {} },
   running: false,
   consentFilter: 'All',
+  workspaceOptions: [],
   log: []
 };
 
@@ -198,9 +199,13 @@ async function runAudit(opts) {
         for (const id of apiIds) {
           log('Reading ' + id + ' from the GTM API…');
           try {
-            if (!STATE.caches.api[id] || opts.refresh) STATE.caches.api[id] = await fetchGtmContainerDetail(id, log);
-            apiDetails.push(STATE.caches.api[id]);
-            if (STATE.caches.api[id].version) fullIds.add(id);
+            const target = i.apiTarget || 'live';
+            const cacheKey = id + '|' + target;
+            if (!STATE.caches.api[cacheKey] || opts.refresh) STATE.caches.api[cacheKey] = await fetchGtmContainerDetail(id, log, target);
+            const d = STATE.caches.api[cacheKey];
+            d.target = target;
+            apiDetails.push(d);
+            if (d.version) fullIds.add(id);
           } catch (e) {
             log(id + ': ' + e.message, true);
             apiDetails.push({ publicId: id, error: e.message });
@@ -253,12 +258,21 @@ async function runAudit(opts) {
       } else if (d.error) {
         findings.push(row_('❌ GTM API Error', d.publicId, 'GTM API', d.error, 'Check access and that a version is published'));
       } else {
+        const isLive = (d.target || 'live') === 'live';
+        if (!(d.version.tag || []).length) {
+          recordIssue_('Hygiene', 'Medium', (isLive ? 'The live version of ' : 'Workspace "' + d.target + '" in ') + d.publicId + ' has no tags',
+            isLive ? 'Nothing is published. If the tags are still being built, choose the workspace under "Version to audit" and run again'
+                   : 'Check you chose the right workspace', d.publicId);
+          log((isLive ? 'The live version of ' + d.publicId + ' has no tags. To audit unpublished work, choose a workspace under "Version to audit".'
+                      : 'Workspace "' + d.target + '" has no tags.'), true);
+        }
         findings = findings.concat(analyseContainerVersion_(d.version, {
-          publicId: d.publicId, source: 'GTM API · live version ' + (d.version.containerVersionId || '?'),
+          publicId: d.publicId,
+          source: isLive ? 'GTM API · live version ' + (d.version.containerVersionId || '?') : 'GTM API · workspace "' + d.target + '" (unpublished)',
           note: joinParts_(d.container.accountName && 'Account: ' + d.container.accountName, 'Full detail from the GTM API')
         }));
         findings = findings.concat(workspaceRowsFromData_(d.workspaces, d.publicId));
-        sources.push('GTM API ' + d.publicId);
+        sources.push('GTM API ' + d.publicId + ((d.target || 'live') === 'live' ? ' (live version)' : ' (workspace "' + d.target + '", unpublished)'));
       }
     });
     if (hasLive) { AUDIT.liveData = i.live; sources.push('Live consent test'); }
@@ -381,6 +395,16 @@ function renderAudit() {
           </div>
           <label for="in-api">GTM container IDs to read through the API</label>
           <input type="text" id="in-api" value="${esc(i.apiIds)}" placeholder="GTM-XXXXXXX">
+          <label for="in-target" style="margin-top:10px">Version to audit</label>
+          <div class="row">
+            <select id="in-target" style="width:auto;min-width:280px">
+              <option value="live" ${(i.apiTarget || 'live') === 'live' ? 'selected' : ''}>Live (published) version</option>
+              ${Array.from(new Set(STATE.workspaceOptions.concat(i.apiTarget && i.apiTarget !== 'live' ? [i.apiTarget] : [])))
+                .map(n => `<option value="${esc(n)}" ${i.apiTarget === n ? 'selected' : ''}>Workspace: ${esc(n)} (unpublished)</option>`).join('')}
+            </select>
+            <button class="btn secondary" data-act="load-workspaces" ${Google.isSignedIn() ? '' : 'disabled'}>Load workspaces</button>
+          </div>
+          <p class="hint">A workspace includes changes that are not live yet. Use it to review work in progress before it's published.</p>
           <label style="margin-top:10px;font-weight:400"><input type="checkbox" id="in-ga4" ${i.ga4 ? 'checked' : ''}> Check the GA4 properties behind the measurement IDs found</label>
         </div>
       </div>
@@ -439,7 +463,7 @@ function renderAudit() {
     el.addEventListener(prop === 'checked' ? 'change' : 'input', () => { STATE.inputs[key] = el[prop || 'value']; saveDraft(); });
   };
   bind('in-client', 'client'); bind('in-site', 'site'); bind('in-public', 'publicIds');
-  bind('in-api', 'apiIds'); bind('in-ga4', 'ga4', 'checked'); bind('in-page', 'pageSource');
+  bind('in-api', 'apiIds'); bind('in-ga4', 'ga4', 'checked'); bind('in-page', 'pageSource'); bind('in-target', 'apiTarget');
   $$('[data-rule]').forEach(el => el.addEventListener('input', () => { STATE.inputs.rules[el.dataset.rule] = el.value; saveDraft(); }));
 
   $('#in-export').addEventListener('change', async e => {
@@ -615,6 +639,10 @@ function renderGroupsView(title, lede, groups, idPrefix) {
 function renderTags() {
   const groups = STATE.result.groups.filter(g => g.isTag);
   renderGroupsView('Tags by platform', 'Every GTM tag, grouped by the platform it sends data to. Tags the AI identified appear in their own groups.', groups, 'tags');
+  if (!groups.length) {
+    $('#tags-list').innerHTML = '<div class="empty"><h3>No tags in what was scanned</h3>If you read a container through the API, its live version may be empty or unpublished. ' +
+      'On <button class="link" data-act="goto" data-view="audit">New audit</button>, click Load workspaces, choose a workspace under "Version to audit" and run the audit again.</div>';
+  }
 }
 
 function renderFindings() {
@@ -916,10 +944,26 @@ document.addEventListener('click', async e => {
   try {
     switch (act) {
       case 'goto': setView(el.dataset.view); break;
-      case 'signin':
-        await Google.signIn(loadAppSettings().googleClientId);
+      case 'signin': {
+        const clientId = ($('#set-client') && $('#set-client').value.trim()) || loadAppSettings().googleClientId;
+        if ($('#set-client') && clientId) saveAppSettings({ googleClientId: clientId });
+        el.disabled = true; el.textContent = 'Waiting for Google…';
+        try { await Google.signIn(clientId); }
+        finally { el.disabled = false; el.textContent = 'Sign in with Google'; }
         toast('Signed in to Google'); VIEWS[STATE.view](); break;
+      }
       case 'signout': Google.signOut(); toast('Signed out of Google'); VIEWS[STATE.view](); break;
+      case 'load-workspaces': {
+        const ids = parseIds(STATE.inputs.apiIds);
+        if (!ids.length) throw new Error('Enter a GTM container ID first.');
+        el.disabled = true; el.textContent = 'Loading…';
+        try {
+          const list = await listGtmWorkspaces(ids[0], m => toast(m));
+          STATE.workspaceOptions = list.map(w => w.name);
+          toast(list.length + ' workspace(s) found in ' + ids[0]);
+        } finally { el.disabled = false; el.textContent = 'Load workspaces'; }
+        renderAudit(); break;
+      }
       case 'rm-export': STATE.inputs.exports.splice(Number(el.dataset.n), 1); renderAudit(); break;
       case 'copy-page-snippet': copyText(PAGE_SOURCE_SNIPPET, 'Page source snippet'); break;
       case 'copy-live-snippet': copyText('(' + liveTestSnippet_.toString() + ')()', 'Live test snippet'); break;

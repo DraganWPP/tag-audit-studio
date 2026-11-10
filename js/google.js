@@ -25,16 +25,35 @@ const Google = {
       if (!window.google || !google.accounts || !google.accounts.oauth2) {
         return reject(new Error('Google sign-in did not load. Check your connection or ad blocker and reload the page.'));
       }
+      let settled = false, waitTimer = null;
+      const done = (fn, value) => { if (settled) return; settled = true; clearTimeout(waitTimer); fn(value); };
       const client = google.accounts.oauth2.initTokenClient({
         client_id: clientId,
         scope: GOOGLE_SCOPES,
         callback: resp => {
-          if (resp.error) return reject(new Error('Google sign-in failed: ' + resp.error));
+          if (resp.error) {
+            return done(reject, new Error('Google sign-in failed: ' + resp.error +
+              (resp.error_description ? ' — ' + resp.error_description : '')));
+          }
           this.token = resp.access_token;
           this.expires = Date.now() + (Number(resp.expires_in || 3600) - 60) * 1000;
-          resolve(this.token);
+          done(resolve, this.token);
         },
-        error_callback: err => reject(new Error('Google sign-in was closed or blocked (' + (err && err.type || 'unknown') + ').'))
+        error_callback: err => {
+          const type = err && err.type || 'unknown';
+          if (type === 'popup_failed_to_open') {
+            return done(reject, new Error('The Google sign-in window was blocked. Allow pop-ups for ' + location.origin + ' and try again.'));
+          }
+          if (type === 'popup_closed') {
+            // Chrome can report "closed" too early because of Cross-Origin-Opener-Policy.
+            // Keep waiting for Google's answer instead of failing straight away.
+            waitTimer = setTimeout(() => done(reject, new Error(
+              'Google sign-in did not finish. If the window showed "Error 400: origin_mismatch", add ' +
+              location.origin + ' to the OAuth client\'s Authorised JavaScript origins in Google Cloud.')), 120000);
+            return;
+          }
+          done(reject, new Error('Google sign-in failed (' + type + ').'));
+        }
       });
       client.requestAccessToken({ prompt: this.token ? '' : 'consent' });
     });
@@ -127,16 +146,63 @@ async function findGtmContainer(publicId, progress) {
   return null;
 }
 
-/** Live version + workspace status for one container. */
-async function fetchGtmContainerDetail(publicId, progress) {
+/** Workspace names for a container (for the "Version to audit" picker). */
+async function listGtmWorkspaces(publicId, progress) {
+  const container = await findGtmContainer(publicId, progress);
+  if (!container) throw new Error('Your Google account has no access to ' + publicId + '.');
+  return Google.listAll(GTM_API + container.path + '/workspaces', 'workspace');
+}
+
+/**
+ * Reads a workspace's current (unpublished) contents in the same shape as a
+ * container version, so the engine can analyse it. Read-only.
+ */
+async function fetchWorkspaceVersion(ws, container, publicId) {
+  const list = (path, field) => Google.listAll(GTM_API + ws.path + '/' + path, field).catch(e => {
+    if (path === 'templates' || path === 'built_in_variables' || path === 'folders') return [];
+    throw e;
+  });
+  const [tags, triggers, variables, builtIns, folders, templates] = await Promise.all([
+    list('tags', 'tag'), list('triggers', 'trigger'), list('variables', 'variable'),
+    list('built_in_variables', 'builtInVariable'), list('folders', 'folder'), list('templates', 'template')
+  ]);
+  return {
+    containerVersionId: 'workspace', name: 'Workspace: ' + ws.name,
+    container: { publicId: publicId, name: container.name },
+    tag: tags, trigger: triggers, variable: variables, builtInVariable: builtIns,
+    folder: folders, customTemplate: templates
+  };
+}
+
+/**
+ * Live version (or a named workspace) + workspace status for one container.
+ * target: 'live' or a workspace name.
+ */
+async function fetchGtmContainerDetail(publicId, progress, target) {
+  target = target || 'live';
   const container = await findGtmContainer(publicId, progress);
   if (!container) return { publicId: publicId, noAccess: true };
-  progress && progress('Reading the live version of ' + publicId + '…');
   let version;
-  try {
-    version = await Google.get(GTM_API + container.path + '/versions:live');
-  } catch (e) {
-    return { publicId: publicId, container: container, error: 'Could not read the live version: ' + e.message };
+  if (target === 'live') {
+    progress && progress('Reading the live version of ' + publicId + '…');
+    try {
+      version = await Google.get(GTM_API + container.path + '/versions:live');
+    } catch (e) {
+      return { publicId: publicId, container: container, error: 'Could not read the live version: ' + e.message };
+    }
+  } else {
+    const all = await Google.listAll(GTM_API + container.path + '/workspaces', 'workspace');
+    const ws = all.filter(w => w.name.trim().toLowerCase() === String(target).trim().toLowerCase())[0];
+    if (!ws) {
+      return { publicId: publicId, container: container,
+               error: 'No workspace called "' + target + '" in ' + publicId + '. Workspaces: ' + all.map(w => w.name).join(', ') };
+    }
+    progress && progress('Reading workspace "' + ws.name + '" of ' + publicId + ' (unpublished changes included)…');
+    try {
+      version = await fetchWorkspaceVersion(ws, container, publicId);
+    } catch (e) {
+      return { publicId: publicId, container: container, error: 'Could not read workspace "' + ws.name + '": ' + e.message };
+    }
   }
   let workspaces = [];
   try {
