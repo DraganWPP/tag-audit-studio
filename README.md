@@ -12,10 +12,58 @@ It's a static web app (HTML, CSS and JavaScript only, with no build step and no 
 | **Summary** | Health score and grade, score per area (Consent, Security, GA4 Setup, GA4 Property, Ads Setup, Accounts & IDs, Legacy, Hygiene, Third Parties), prioritised actions |
 | **Consent matrix** | Every tag with its purpose, how it waits for consent (built-in Consent Mode, Additional Consent Checks, CMP trigger) and a risk rating |
 | **Tags** | Tags grouped by platform (GA4, Google Ads, Floodlight, Meta, TikTok, LinkedIn, Amazon, …) with vendor logos |
-| **IDs** | Every pixel, account and measurement ID, with flags for leftover or duplicate IDs and a "client confirms" tick box |
+| **IDs** | Every pixel, account and measurement ID, with flags for leftover or duplicate IDs |
 | **Live test** | What fired before a choice, after Deny and after Accept, from a console snippet |
 | **AI assistant** | Client report · identify unknown tags from their code (updates the consent matrix) · GTM fix plan · chat about the audit |
 | **Exports** | PDF report (print), CSV per table, save and reopen audits (`.json`) |
+
+### Expandable tag details
+
+Click an underlined tag name to expand its details in place; click again to
+collapse it. The same inspector is available in Tags, All findings, Consent,
+ID references, linked findings on Summary, and recognised tag-name mentions in
+AI reports/chat. Live test vendors link to related container tags when available,
+but a vendor request is not proof that any particular GTM tag fired.
+
+For GTM API and export sources, the inspector preserves complete Custom HTML,
+all tag configuration fields, notes, consent and sequencing settings, and related
+trigger, variable and custom-template definitions. Tags, triggers and variables
+first open a read-only GTM-style configuration view: labelled fields, settings
+tables, full available custom code, consent settings and firing conditions.
+Configuration cards follow GTM's type rows, labelled fields, section dividers
+and compact two-column settings tables, with theme-aware colours. GA4 event
+parameters, ecommerce and consent are grouped within the tag configuration.
+**More details** expands the original technical inspector, including raw
+configuration, analysis and related definitions. Unrecognised parameter keys
+are split into readable labels; custom-template controls are not recreated.
+Only supplied settings are shown, not assumed GTM defaults. Built-in consent
+checks are not supplied as an authoritative list and must be verified in GTM.
+Code is displayed as escaped
+text, never executed. Published containers show the available compiled
+configuration and clearly identify missing authoring details or partial parsing.
+Older saved audits may contain only truncated analysis text; re-run the audit to
+capture full configuration. New saved audits retain the full details, which may
+include sensitive values in tag code/settings: inspect them before sharing.
+
+In the Tags view, use **Tags / Triggers / Variables** beside the search and
+Expand/Collapse controls. Triggers and Variables use the same searchable groups;
+click a name to expand its configuration, complete available custom JavaScript,
+template definition, and inbound/outbound references. Reference links also open
+the corresponding tag, trigger or variable in place.
+
+**Unused** means no *other* item references that definition in the supplied API
+or export snapshot. Firing triggers, exceptions, trigger-group members,
+references in parameter values, enabled built-in variables and references from
+paused tags are accounted for. Self-references do not count as use. A reference
+from an otherwise unused item still counts: this is not a reachability analysis
+or proof of execution, and dynamic lookups cannot be inferred. Review before
+deleting anything. The Hygiene findings use the same reference check for
+custom variables and original triggers.
+
+Published sources show available compiled rules and variables with **Not checked**
+usage status, never an unused claim. Original names and authoring definitions
+need an API source or export. Older saved audits need a re-run to capture the
+complete inventory, especially unused definitions.
 
 ## Deploy to GitHub Pages
 
@@ -58,9 +106,31 @@ The key is stored in the browser's local storage and sent only to that provider.
    - **Container export:** in GTM go to *Admin → Export Container* and upload the file.
    - **Page source:** browsers can't download other websites, so on the client's site press **F12 → Console** and run the page-source snippet (the copy button is in the app), then paste the result.
    - **Live consent test:** in an Incognito window, run the live-test snippet before choosing, after Deny, and after Accept (in a fresh window), and paste each result.
-3. Optionally open **Client rules** to set the client's own CMP category IDs, whether analytics needs consent, their naming pattern, and approved vendors and IDs.
+3. Optionally open **Client rules** to set the client's own CMP category IDs, whether analytics needs consent, their naming pattern, and approved vendors.
 4. Click **Run audit**. Containers covered by the API or an export are not scanned publicly as well, so tags are not counted twice.
 5. Use **Summary → Export PDF report**. The PDF includes the AI client report and fix plan if you generated them.
+
+### Optional local browser runner
+
+The [local GTM-guided runner](runner/README.md) reads a GTM export and opens
+Chromium on your computer. Select trigger actions (visits, clicks, scrolls,
+waits or manual journeys), then manually confirm the cookie choice in three
+isolated sessions: before a choice, reject all and accept all.
+
+Install Node.js 22+, then run:
+
+```powershell
+npm install
+npx playwright install chromium
+npm run runner -- --url https://example.com --export "C:\Audits\container.json"
+```
+
+Import the generated `.runner.json` file under **Live consent test**. It includes
+vendor observations, action outcomes, event names and a tag coverage plan.
+Actions do not prove individual tags fired; confirm those in GTM Preview.
+Use only on authorised sites and avoid real purchases/leads. This first version
+uses no AI navigation and requires no hosted backend. Playwright is a local
+development dependency, not part of the static web app.
 
 ## Privacy
 
@@ -72,6 +142,9 @@ The key is stored in the browser's local storage and sent only to that provider.
 - Snippets read cookie **names** only, never values.
 - **Identify unknown tags** sends the code of those tags to the AI provider. The other AI features send only the findings.
 - Saved audits are downloaded as files. Nothing is uploaded.
+- The optional local runner visits the target site and its normal third parties.
+  It saves request hosts/status, cookie names and event names locally; no request
+  bodies, headers, full request URLs or cookie values are saved.
 
 ## Limitations
 

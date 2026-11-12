@@ -5,6 +5,14 @@
   "description": "Audit GTM, GA4 and cookie consent setups in the browser and produce a client-ready report.",
   "scripts": {
     "start": "npx --yes http-server . -p 8000 -c-1",
-    "check": "node --check js/engine.js && node --check js/engine-web.js && node --check js/google.js && node --check js/ai.js && node --check js/app.js"
+    "check": "node --check js/engine.js && node --check js/engine-web.js && node --check js/google.js && node --check js/ai.js && node --check js/app.js && node --check runner/core.cjs && node --check runner/run.cjs",
+    "runner": "node runner/run.cjs",
+    "test": "node --test tests/runner.test.cjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.56.1"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

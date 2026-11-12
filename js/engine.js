@@ -771,6 +771,7 @@ function analyseCompiledResource_(id, js, res) {
 
   if (consentDefaultIn_(text)) AUDIT.consentMode.defaultViaGtm = true;
 
+  const tagOffset = AUDIT.tags.length;
   realTags.forEach(x => {
     const t = x.t;
     const isPaused = t.function === '__paused';
@@ -782,9 +783,12 @@ function analyseCompiledResource_(id, js, res) {
       firesOn: firing[x.i].add, blockedBy: firing[x.i].block, sequenced: sequenced.has(x.i),
       gateText: firing[x.i].add.concat(firing[x.i].block).join(' | '),
       additionalChecks: checks,
-      consent: checks.length ? 'Consent: requires ' + checks.join(', ') : ''
+      consent: checks.length ? 'Consent: requires ' + checks.join(', ') : '',
+      inspection: compiledTagInspection_(t, x.i, res, R)
     }));
   });
+
+  recordCompiledInventory_(id, res, new Map(realTags.map((x, i) => [x.i, tagOffset + i])));
 
   groups.forEach(t => {
     const members = R.render(t.vtp_triggerIds);
@@ -812,6 +816,37 @@ function analyseCompiledResource_(id, js, res) {
                   builtIns.length + ' built-in variables in use (provided by GTM, not the site)'));
   }
 
+  function compiledTagInspection_(tag, index, resource, renderer) {
+    const rules = (resource.rules || []).filter(rule => Array.isArray(rule) && rule.slice(1).some(part =>
+      Array.isArray(part) && /^(add|block)$/.test(part[0]) && part.slice(1).indexOf(index) >= 0));
+    const predicateIds = new Set();
+    rules.forEach(rule => rule.slice(1).forEach(part => {
+      if (Array.isArray(part) && /^(if|unless)$/.test(part[0])) part.slice(1).forEach(i => predicateIds.add(i));
+    }));
+    const predicates = Array.from(predicateIds).map(i => ({ index: i, configuration: (resource.predicates || [])[i] }));
+    const macros = [], sequence = [], seen = new Set(), seenTags = new Set([index]);
+    const walk = value => {
+      if (!value || typeof value !== 'object') return;
+      if (Array.isArray(value) && value[0] === 'macro' && !seen.has(value[1])) {
+        seen.add(value[1]);
+        const macro = (resource.macros || [])[value[1]];
+        if (macro) { macros.push({ index: value[1], configuration: macro }); walk(macro); }
+      }
+      if (Array.isArray(value) && value[0] === 'tag' && !seenTags.has(value[1])) {
+        seenTags.add(value[1]);
+        const related = (resource.tags || [])[value[1]];
+        if (related) { sequence.push({ index: value[1], configuration: related }); walk(related); }
+      }
+      Object.keys(value).forEach(k => walk(value[k]));
+    };
+    walk([tag, predicates]);
+    return {
+      format: 'compiled', source: 'Published gtm.js', configuration: tag,
+      code: tag.vtp_html == null ? null : renderer.render(tag.vtp_html),
+      triggers: rules, predicates: predicates, variables: macros, sequence: sequence
+    };
+  }
+
   compiledCustomEvents_(preds, R, eventMacros).forEach(name => out.push(row_(
     '📌 GTM Custom Event', name, id,
     'Triggers fire on dataLayer.push({ event: "' + name + '" })', '')));
@@ -821,6 +856,55 @@ function analyseCompiledResource_(id, js, res) {
     'Register it as a custom dimension in GA4')));
 
   return out.concat(findVendors_(text, id), analyseConfigText_(text, id, 'gtm'));
+}
+
+function recordCompiledInventory_(container, resource, tagIndices) {
+  const rules = resource.rules || [], macros = resource.macros || [], predicates = resource.predicates || [];
+  const add = (kind, name, type, configuration) => {
+    const entry = {
+      name: name, id: name, type: type, typeLabel: type, container: container,
+      source: 'Published gtm.js', format: 'compiled', configuration: configuration,
+      usageKnown: false, usage: [], references: []
+    };
+    return { kind: kind, index: AUDIT[kind].push(entry) - 1, entry: entry };
+  };
+  const triggers = rules.map((rule, i) => {
+    const ids = new Set();
+    if (Array.isArray(rule)) rule.slice(1).forEach(part => {
+      if (Array.isArray(part) && /^(if|unless)$/.test(part[0])) part.slice(1).forEach(id => ids.add(id));
+    });
+    return add('triggers', 'Compiled rule #' + i, 'Compiled firing rule', {
+      rule: rule, predicates: Array.from(ids).map(id => ({ index: id, configuration: predicates[id] }))
+    });
+  });
+  const variables = macros.map((macro, i) =>
+    add('variables', 'Variable #' + i, GTM_VARIABLES[macro.function] || macro.function, macro));
+  const link = (target, owner, role) => {
+    if (!target || target === owner) return;
+    const ref = item => ({ kind: item.kind, index: item.index, name: item.entry.name, role: role });
+    if (!target.entry.usage.some(r => r.kind === owner.kind && r.index === owner.index)) {
+      target.entry.usage.push(ref(owner)); owner.entry.references.push(ref(target));
+    }
+  };
+  const macroRefs = (value, owner) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value) && value[0] === 'macro') link(variables[value[1]], owner, 'Compiled variable reference');
+    Object.keys(value).forEach(key => macroRefs(value[key], owner));
+  };
+  (resource.tags || []).forEach((tag, i) => {
+    const index = tagIndices.get(i);
+    const owner = index !== undefined
+      ? { kind: 'tags', index: index, entry: { name: AUDIT.tags[index].label, references: [] } }
+      : { kind: 'compiled', index: i, entry: { name: 'Published listener / internal tag #' + i, references: [] } };
+    macroRefs(tag, owner);
+    triggers.forEach((trigger, j) => {
+      if (Array.isArray(rules[j]) && rules[j].slice(1).some(part =>
+        Array.isArray(part) && /^(add|block)$/.test(part[0]) && part.slice(1).indexOf(i) >= 0)) {
+        link(trigger, owner, 'Compiled firing / blocking rule');
+      }
+    });
+  });
+  variables.concat(triggers).forEach(item => macroRefs(item.entry.configuration, item));
 }
 
 /** Turns compiled values (["macro",3], ["template",…], ["list",…]) into readable text. */
@@ -971,6 +1055,7 @@ function buildTagRow_(o) {
 
   const row = row_((o.paused ? '⏸️ Paused · ' : '🏷️ ') + label, value, source, details, notes);
   row.group = group;   // used by groupFindings_ to file the row under its platform
+  row.tagIndex = AUDIT.tags.length - 1;
   return row;
 }
 
@@ -1249,7 +1334,8 @@ function analyseContainerRegex_(id, js) {
     const type = t.fn.replace(/^__/, '');
     out.push(buildTagRow_({
       def: tagDef_(type), p: regexAdapter_(t.ctx), type: type, paused: type === 'paused',
-      tagNumber: (t.ctx.match(/"tag_id"\s*:\s*(\d+)/) || [])[1], source: id, firesOn: null
+      tagNumber: (t.ctx.match(/"tag_id"\s*:\s*(\d+)/) || [])[1], source: id, firesOn: null,
+      inspection: { format: 'limited', source: 'Published gtm.js (partial parser)', configuration: t.ctx }
     }));
   });
   countBy_(listeners, e => GTM_LISTENERS[e.fn]).forEach(c => out.push(row_(
@@ -1366,17 +1452,10 @@ function analyseContainerVersion_(version, meta) {
   const triggerName = tid => triggerById[tid] ? triggerById[tid].name : (BUILT_IN_TRIGGERS[tid] || 'Trigger ' + tid);
   const withFolder = item => id + (folderName[item.parentFolderId] ? ' · 📁 ' + folderName[item.parentFolderId] : '');
 
-  // Trigger usage and tag sequencing
-  const usage = {};
-  const use = (tid, label) => { (usage[tid] = usage[tid] || []).push(label); };
+  // Tag sequencing can fire tags without their own firing triggers.
   const sequenced = new Set();
   tags.forEach(t => {
-    (t.firingTriggerId || []).forEach(tid => use(tid, t.name));
-    (t.blockingTriggerId || []).forEach(tid => use(tid, t.name + ' (blocking)'));
     [].concat(t.setupTag || [], t.teardownTag || []).forEach(s => sequenced.add(s.tagName));
-  });
-  triggers.filter(t => t.type === 'triggerGroup').forEach(g => {
-    apiTriggerRefs_(g.parameter).forEach(tid => use(tid, 'group "' + g.name + '"'));
   });
 
   const text = JSON.stringify(version);
@@ -1414,6 +1493,7 @@ function analyseContainerVersion_(version, meta) {
   if (/ads_data_redaction/.test(text)) AUDIT.consentMode.redaction = true;
   if (/url_passthrough/.test(text)) AUDIT.consentMode.passthrough = true;
 
+  const tagOffset = AUDIT.tags.length;
   tags.forEach(t => {
     const p = apiAdapter_(t.parameter, varByName);
     const cs = t.consentSettings || {};
@@ -1429,7 +1509,8 @@ function analyseContainerVersion_(version, meta) {
       sequenced: sequenced.has(t.name),
       consent: describeConsentSettings_(t.consentSettings),
       sequence: describeSequence_(t),
-      notes: t.notes
+      notes: t.notes,
+      inspection: apiTagInspection_(t, version, meta.source)
     }));
     if (t.type === 'googtag' || t.type === 'gaawc') {
       settingRows_(p.pairs('configSettingsTable').concat(p.pairs('fieldsToSet')), id + ' · ' + t.name)
@@ -1437,26 +1518,83 @@ function analyseContainerVersion_(version, meta) {
     }
   });
 
-  triggers.forEach(t => out.push(describeApiTrigger_(t, withFolder(t), usage[t.triggerId] || [])));
-
-  const refsText = JSON.stringify([tags, triggers, variables]);
-  let unusedVars = 0;
-  variables.forEach(v => {
-    const p = apiAdapter_(v.parameter, varByName);
-    const refs = refsText.split('{{' + v.name + '}}').length - 1;
-    if (!refs) unusedVars++;
-    out.push(row_('📐 GTM Variable', v.name, withFolder(v),
-                  joinParts_(varTypeLabel_(v.type), variableKeyInfo_(v.type, p)),
-                  refs ? 'Referenced ' + refs + ' time(s)' : '⚠️ Not referenced anywhere — candidate for removal'));
+  const inventory = recordApiInventory_(version, meta.source, id, tagOffset);
+  triggers.forEach((t, i) => {
+    const row = describeApiTrigger_(t, withFolder(t), inventory.triggers[i].entry.usage.map(ref =>
+      ref.name + ' (' + ref.role + (ref.paused ? ', paused' : '') + ')'));
+    row.entity = { kind: 'triggers', index: inventory.triggers[i].index };
+    out.push(row);
   });
-  if (builtIns.length) {
-    out.push(row_('📐 GTM Variable', 'Built-in variables', id, builtIns.map(b => b.name).join(', '),
-                  builtIns.length + ' built-in variables enabled'));
+
+  let unusedVars = 0;
+  variables.forEach((v, i) => {
+    const p = apiAdapter_(v.parameter, varByName);
+    const refs = inventory.variables[i].entry.usage.length;
+    if (!refs) unusedVars++;
+    const row = row_('📐 GTM Variable', v.name, withFolder(v),
+                    joinParts_(varTypeLabel_(v.type), variableKeyInfo_(v.type, p)),
+                    refs ? 'Referenced by ' + refs + ' item(s)' : '⚠️ Not referenced anywhere — candidate for removal');
+    row.entity = { kind: 'variables', index: inventory.variables[i].index };
+    out.push(row);
+  });
+  builtIns.forEach((v, i) => {
+    const item = inventory.variables[variables.length + i];
+    const row = row_('📐 GTM Variable', v.name, id, 'Built-in variable · ' + (varTypeLabel_(v.type) || v.type),
+      item.entry.usage.length ? 'Referenced by ' + item.entry.usage.length + ' item(s)' : 'No explicit references found');
+    row.entity = { kind: 'variables', index: item.index };
+    out.push(row);
+  });
+
+  function apiTagInspection_(tag, version, source) {
+    const triggers = [], variables = [], sequence = [];
+    const triggerIds = new Set(), variableNames = new Set(), tagNames = new Set([tag.name]);
+    const addTrigger = id => {
+      if (triggerIds.has(id)) return;
+      triggerIds.add(id);
+      const trigger = (version.trigger || []).filter(t => t.triggerId === id)[0];
+      if (trigger) {
+        triggers.push(trigger);
+        apiTriggerRefs_(trigger.parameter).forEach(addTrigger);
+      } else triggers.push({ triggerId: id, name: BUILT_IN_TRIGGERS[id] || 'Trigger ' + id, unavailable: !BUILT_IN_TRIGGERS[id] });
+    };
+    const addTagDependencies = t => {
+      (t.firingTriggerId || []).concat(t.blockingTriggerId || []).forEach(addTrigger);
+      (t.setupTag || []).concat(t.teardownTag || []).forEach(ref => {
+        if (tagNames.has(ref.tagName)) return;
+        tagNames.add(ref.tagName);
+        const related = (version.tag || []).filter(item => item.name === ref.tagName || item.tagId === ref.tagName)[0];
+        if (related) { sequence.push(related); addTagDependencies(related); }
+      });
+    };
+    const addVariables = value => {
+      if (value && typeof value === 'object') {
+        Object.keys(value).forEach(key => addVariables(value[key]));
+        return;
+      }
+      if (typeof value !== 'string') return;
+      for (const match of value.matchAll(/\{\{([^{}]+)\}\}/g)) {
+        if (variableNames.has(match[1])) continue;
+        variableNames.add(match[1]);
+        const variable = (version.variable || []).concat(version.builtInVariable || []).filter(v => v.name === match[1])[0];
+        if (variable) { variables.push(variable); addVariables(variable); }
+        else variables.push({ name: match[1], unavailable: true });
+      }
+    };
+    addTagDependencies(tag);
+    addVariables([tag, triggers, sequence]);
+    const html = (tag.parameter || []).filter(p => p.key === 'html')[0];
+    return {
+      format: 'api', source: source, configuration: tag,
+      code: html && html.value != null ? String(html.value) : null,
+      triggers: triggers, variables: variables, sequence: sequence,
+      templates: (version.customTemplate || []).filter(t => t.templateId &&
+        [tag].concat(sequence).some(item => String(item.type || '').endsWith('_' + t.templateId)))
+    };
   }
 
   // Housekeeping only visible with full detail (tag-level checks run in runAuditChecks_)
   const namesOf = arr => arr.map(x => x.name);
-  const unusedTriggers = triggers.filter(t => !(usage[t.triggerId] || []).length);
+  const unusedTriggers = triggers.filter((t, i) => !inventory.triggers[i].entry.usage.length);
   if (unusedTriggers.length) {
     recordIssue_('Hygiene', 'Low', unusedTriggers.length + ' unused trigger(s)',
                  'Delete triggers that no tag uses', id, namesOf(unusedTriggers));
@@ -1464,7 +1602,7 @@ function analyseContainerVersion_(version, meta) {
   if (unusedVars) {
     recordIssue_('Hygiene', 'Low', unusedVars + ' unreferenced variable(s)',
                  'Delete variables that nothing references', id,
-                 variables.filter(v => refsText.split('{{' + v.name + '}}').length === 1).map(v => v.name));
+                 variables.filter((v, i) => !inventory.variables[i].entry.usage.length).map(v => v.name));
   }
   if (folders.length) {
     const loose = tags.filter(t => !t.parentFolderId);
@@ -1496,6 +1634,76 @@ function analyseContainerVersion_(version, meta) {
     findPaymentDomains_(text, id),
     findEcommerce_(text, id)
   );
+}
+
+function apiVariableRefs_(configuration) {
+  const names = new Set();
+  const walk = value => {
+    if (!value || typeof value !== 'object') return;
+    Object.keys(value).forEach(key => {
+      if (key === 'value' && typeof value[key] === 'string') {
+        for (const match of value[key].matchAll(/\{\{([^{}]+)\}\}/g)) names.add(match[1]);
+      } else if (typeof value[key] === 'object') walk(value[key]);
+    });
+  };
+  walk(configuration);
+  return Array.from(names);
+}
+
+function recordApiInventory_(version, source, container, tagOffset) {
+  const folder = item => ((version.folder || []).filter(f => f.folderId === item.parentFolderId)[0] || {}).name || '';
+  const add = (kind, configuration, builtIn) => {
+    const type = configuration.type || (builtIn ? 'built-in' : 'unknown');
+    const p = apiAdapter_(configuration.parameter, {});
+    const entry = {
+      name: configuration.name || configuration.triggerId || configuration.variableId || 'Unnamed',
+      id: configuration.triggerId || configuration.variableId || configuration.name,
+      type: type, typeLabel: kind === 'triggers' ? TRIGGER_TYPES[type] || type : varTypeLabel_(type),
+      container: container, source: source, format: 'api', folder: folder(configuration), builtIn: !!builtIn,
+      configuration: configuration, code: kind === 'variables' ? p.get('javascript') : null,
+      usageKnown: true, usage: [], references: [],
+      templates: (version.customTemplate || []).filter(t => t.templateId && String(type).endsWith('_' + t.templateId))
+    };
+    const index = AUDIT[kind].push(entry) - 1;
+    return { kind: kind, index: index, entry: entry };
+  };
+  const triggers = (version.trigger || []).map(t => add('triggers', t, false));
+  const variables = (version.variable || []).map(v => add('variables', v, false))
+    .concat((version.builtInVariable || []).map(v => add('variables', v, true)));
+  const triggerMap = new Map(triggers.map(t => [String(t.entry.id), t]));
+  const variableMap = new Map(variables.map(v => [v.entry.name, v]));
+  const ref = (item, role) => ({
+    kind: item.kind, index: item.index, name: item.entry.name, role: role || '',
+    paused: !!item.entry.configuration.paused
+  });
+  const use = (target, owner, role) => {
+    if (!target || (target.kind === owner.kind && target.index === owner.index)) return;
+    if (!target.entry.usage.some(r => r.kind === owner.kind && r.index === owner.index && r.role === role)) {
+      target.entry.usage.push(ref(owner, role));
+      owner.entry.references.push(ref(target, role));
+    }
+  };
+  const triggerUse = (id, owner, role) => {
+    id = String(id);
+    if (!triggerMap.has(id) && BUILT_IN_TRIGGERS[id]) {
+      const item = add('triggers', { triggerId: id, name: BUILT_IN_TRIGGERS[id], type: 'always' }, true);
+      triggerMap.set(id, item); triggers.push(item);
+    }
+    use(triggerMap.get(id), owner, role);
+  };
+  const owners = (version.tag || []).map((tag, i) => ({
+    kind: 'tags', index: tagOffset + i, entry: { name: tag.name, configuration: tag, references: [] }
+  })).concat(triggers, variables);
+  owners.forEach(owner => {
+    const cfg = owner.entry.configuration;
+    if (owner.kind === 'tags') {
+      (cfg.firingTriggerId || []).forEach(id => triggerUse(id, owner, 'Firing trigger'));
+      (cfg.blockingTriggerId || []).forEach(id => triggerUse(id, owner, 'Exception'));
+    }
+    apiTriggerRefs_(cfg.parameter).forEach(id => triggerUse(id, owner, 'Trigger reference'));
+    apiVariableRefs_(cfg).forEach(name => use(variableMap.get(name), owner, 'Variable reference'));
+  });
+  return { triggers: triggers, variables: variables };
 }
 
 /** Adapter over API / export parameters ([{type, key, value, list, map}]). */
@@ -1699,7 +1907,9 @@ function recordTag_(o, label, summary, source, group) {
     gateText: o.gateText || (o.firesOn || []).concat(o.blockedBy || []).join(' | '),
     additionalChecks: o.additionalChecks || [], consentNotNeeded: !!o.consentNotNeeded,
     noTrigger: !!(o.firesOn && !o.firesOn.length && !o.paused && !o.sequenced),
-    text: String(text).substring(0, 30000)
+    text: String(text).substring(0, 30000),
+    inspection: o.inspection || null, folder: o.folder || '', notes: o.notes || '',
+    sequence: o.sequence || '', sequenced: !!o.sequenced
   };
   AUDIT.tags.push(rec);
 
@@ -1977,7 +2187,6 @@ const SETTINGS_DEFS = [
   ['analyticsConsent', 'Analytics needs consent? (Yes/No)', 'Yes',       'Yes for UK/EEA. "No" turns ungated analytics tags from High into Check'],
   ['namingPattern', 'Tag naming pattern (regex)',        '',             'e.g. ^[^-]+ - [^-]+ - .+$   Empty = any "A - B" style name counts'],
   ['approvedVendors', 'Approved vendors (comma list)',   '',             'e.g. Meta, Google Ads, Adform. Empty = no vendor check'],
-  ['approvedIds',   'Approved IDs (comma list)',         '',             'Pixel / account IDs the client confirmed. Empty = no ID check'],
   ['ga4Checks',     'GA4 property checks (Auto/Yes/No)', 'Auto',         'Auto = run when the Google Analytics Admin API service is enabled']
 ];
 
@@ -2060,7 +2269,6 @@ function idKindLabel_(key) {
 }
 
 function checkIds_() {
-  const S = readClientSettings_();
   const live = Object.keys(AUDIT.ids).map(k => AUDIT.ids[k]).filter(r => r.live);
   const byPlatform = {};
   live.forEach(r => { (byPlatform[r.platform] = byPlatform[r.platform] || []).push(r); });
@@ -2078,14 +2286,6 @@ function checkIds_() {
                    list.map(r => r.id));
     }
   });
-  if (S.approvedIds.length) {
-    const unknown = live.filter(r => S.approvedIds.indexOf(r.id.toUpperCase()) < 0);
-    if (unknown.length) {
-      recordIssue_('Accounts & IDs', 'Medium', unknown.length + ' live ID(s) not on the approved list',
-                   'Check who owns these IDs; remove any that are not the client\'s', 'ID Inventory',
-                   unknown.map(r => r.platform + ' ' + r.id));
-    }
-  }
 }
 
 
@@ -2242,7 +2442,7 @@ const LIVE_PROP_KEY = 'liveConsentTest';
  * Runs in the website's browser console — NOT in Apps Script.
  * Its source is shown in the dialog (via toString), so keep it self-contained.
  */
-function liveTestSnippet_() {
+function liveTestSnippet_(observation) {
   var V = [
     ['GA4', 'analytics', /\/g\/collect|google-analytics\.com\/(g|mp)\//],
     ['Google Ads', 'advertising', /googleadservices\.com|googleads\.g\.doubleclick\.net|\/pagead\/|\/ccm\/collect|google\.[a-z.]+\/(rmkt|pagead)/],
@@ -2288,7 +2488,7 @@ function liveTestSnippet_() {
   var add = function (name) {
     return vendors[name] = vendors[name] || { purpose: purposeOf[name] || 'unknown', requests: 0, cookies: [] };
   };
-  var urls = performance.getEntriesByType('resource').map(function (r) { return r.name; });
+  var urls = observation && observation.urls || performance.getEntriesByType('resource').map(function (r) { return r.name; });
   urls.forEach(function (u) {
     for (var i = 0; i < V.length; i++) {
       if (V[i][2].test(u)) { add(V[i][0]).requests++; return; }
@@ -2298,7 +2498,7 @@ function liveTestSnippet_() {
       if (h.indexOf(root) < 0 && !/gstatic|googleapis|googletagmanager|fonts\.|cdnjs|jsdelivr|unpkg|cloudflare|jquery|youtube|ytimg|vimeo/.test(h)) other[h] = 1;
     } catch (e) { /* ignore */ }
   });
-  var names = document.cookie.split(';').map(function (c) { return c.trim().split('=')[0]; }).filter(Boolean);
+  var names = observation && observation.cookieNames || document.cookie.split(';').map(function (c) { return c.trim().split('=')[0]; }).filter(Boolean);
   names.forEach(function (n) {
     Object.keys(C).forEach(function (k) {
       if (n === k || n.indexOf(k + '_') === 0) {
@@ -2339,7 +2539,9 @@ function liveTestSnippet_() {
     otherHosts: Object.keys(other).slice(0, 40), cookieCount: names.length
   };
   var s = JSON.stringify(out);
-  try { copy(s); console.log('✅ Copied (' + stage + ') — paste it into Tag Scanner → Live Consent Test'); } catch (e) { /* copy() only exists in DevTools */ }
+  if (!observation) {
+    try { copy(s); console.log('✅ Copied (' + stage + ') — paste it into Tag Scanner → Live Consent Test'); } catch (e) { /* copy() only exists in DevTools */ }
+  }
   return s;
 }
 

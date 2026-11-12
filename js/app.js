@@ -40,10 +40,10 @@ const STATE = {
   result: null,
   ai: { writeup: '', fixplan: '', chat: [], busy: '' },
   overrides: {},
-  confirmations: {},
   caches: { containers: {}, api: {}, ga4: {} },
   running: false,
   consentFilter: 'All',
+  tagSection: 'tags',
   workspaceOptions: [],
   log: []
 };
@@ -318,7 +318,9 @@ async function runAudit(opts) {
 function buildResult(rows, sources) {
   const groups = groupFindings_(rows).map(g => ({
     name: g.name, plain: g.plain || null, logo: g.logo || '', header: g.header,
-    isTag: !!(g.rows[0] && g.rows[0].group), rows: g.rows.map(r => r.slice(0, 5))
+    isTag: !!(g.rows[0] && g.rows[0].group), rows: g.rows.map(r => r.slice(0, 5)),
+    tagIndices: g.rows.map(r => Number.isInteger(r.tagIndex) ? r.tagIndex : null),
+    entityRefs: g.rows.map(r => r.entity || null)
   }));
   const issues = AUDIT.issues.slice().sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
   const areas = AREAS.map(area => {
@@ -346,7 +348,8 @@ function buildResult(rows, sources) {
     score: overallScore_(),
     live: live,
     audit: {
-      tags: tags, ids: AUDIT.ids, consentMode: AUDIT.consentMode, fullDetail: AUDIT.fullDetail,
+      tags: tags, triggers: AUDIT.triggers, variables: AUDIT.variables,
+      ids: AUDIT.ids, consentMode: AUDIT.consentMode, fullDetail: AUDIT.fullDetail,
       pageScanned: AUDIT.pageScanned, ga4PropertyChecked: AUDIT.ga4PropertyChecked, liveTest: AUDIT.liveTest,
       issues: issues
     }
@@ -439,13 +442,14 @@ function renderAudit() {
             ${stages.length ? '<button class="link" data-act="clear-live">Clear live results</button>' : ''}
           </div>
           <div class="chips">${Object.keys(LIVE_STAGES).map(k => `<span class="chip ${stages.indexOf(k) >= 0 ? 'on' : ''}">${esc(LIVE_STAGES[k])}</span>`).join('')}</div>
+          ${runnerImportControl()}
         </div>
       </div>
     </section>
 
     <section class="form-block">
       <details class="rules">
-        <summary>Client rules (consent categories, naming, approved vendors and IDs)</summary>
+        <summary>Client rules (consent categories, naming and approved vendors)</summary>
         ${ruleDefs.map(d => `
           <div class="rule"><div><label for="rule-${d[0]}">${esc(d[1])}</label><p class="hint">${esc(d[3])}</p></div>
           <div><input type="text" id="rule-${d[0]}" data-rule="${d[0]}" value="${esc(i.rules[d[0]] != null ? i.rules[d[0]] : d[2])}"></div></div>`).join('')}
@@ -479,6 +483,421 @@ function renderAudit() {
 // ══════════════════════════════════════════════════════════════════
 //  VIEW: SUMMARY
 // ══════════════════════════════════════════════════════════════════
+
+let tagPanelId = 0;
+
+function tagToggle(index, label) {
+  const tag = STATE.result && STATE.result.audit.tags[index];
+  if (!tag) return esc(label);
+  return `<button type="button" class="tag-toggle" data-act="tag-details" data-tag-index="${index}" aria-expanded="false">${esc(label || tag.label)}</button>`;
+}
+
+function entityToggle(kind, index, label) {
+  const entry = STATE.result && (STATE.result.audit[kind] || [])[index];
+  if (!entry || !['triggers', 'variables'].includes(kind)) return esc(label);
+  return `<button type="button" class="tag-toggle" data-act="entity-details" data-entity-kind="${kind}" data-entity-index="${index}" aria-expanded="false">${esc(label || entry.name)}</button>`;
+}
+
+function entityUsage(entry) {
+  if (!entry.usageKnown) return { label: 'Not checked', style: 'Info' };
+  return entry.usage.length ? { label: 'Referenced', style: 'OK' } : { label: 'Unused', style: 'Check' };
+}
+
+function inventoryReference(reference) {
+  const label = reference.name + (reference.paused ? ' (paused)' : '');
+  const control = reference.kind === 'tags' ? tagToggle(reference.index, label)
+    : ['triggers', 'variables'].includes(reference.kind) ? entityToggle(reference.kind, reference.index, label) : esc(label);
+  return `<li>${control}${reference.role ? `<span class="sub">${esc(reference.role)}</span>` : ''}</li>`;
+}
+
+function entityTechnicalContent(kind, entry) {
+  const usage = entityUsage(entry);
+  return `<div class="tag-detail-content"><h2>${esc(entry.name)}</h2>
+    <p class="hint">${entry.format === 'api'
+      ? 'Complete configuration from the GTM API / export. Static references include paused tags and other container items; they do not prove execution. Dynamic lookups cannot be inferred. Review before deleting an unused item.'
+      : 'Published-container representation only: original definitions and names may be unavailable. Unused status cannot be established from compiled data.'}</p>
+    <dl class="tag-facts">
+      <div><dt>Source</dt><dd>${esc(entry.container)} · ${esc(entry.source)}</dd></div>
+      <div><dt>Type</dt><dd>${esc(entry.typeLabel)} (${esc(entry.type)})</dd></div>
+      <div><dt>Usage</dt><dd><span class="sev ${usage.style}">${usage.label}</span></dd></div>
+      ${entry.folder ? `<div><dt>Folder</dt><dd>${esc(entry.folder)}</dd></div>` : ''}
+      ${entry.builtIn ? '<div><dt>Definition</dt><dd>Built-in GTM item</dd></div>' : ''}
+    </dl>
+    <h3>Referenced by</h3>${entry.usage.length ? `<ul class="inventory-references">${entry.usage.map(inventoryReference).join('')}</ul>`
+      : `<p>${entry.usageKnown ? 'No other tags, triggers or variables reference this item in the supplied snapshot.'
+        : 'No references identified in the available compiled data; this does not establish that the item is unused.'}</p>`}
+    ${entry.references.length ? `<h3>References</h3><ul class="inventory-references">${entry.references.map(inventoryReference).join('')}</ul>` : ''}
+    ${tagConfigurationSection('Custom JavaScript / code (as configured)', entry.code)}
+    ${tagConfigurationSection('Complete ' + (kind === 'triggers' ? 'trigger' : 'variable') + ' configuration available from this source', entry.configuration)}
+    ${tagConfigurationSection('Custom template definitions', entry.templates)}
+  </div>`;
+}
+
+function tagReferences(tags) {
+  return tags.map(tag => tagToggle(STATE.result.audit.tags.indexOf(tag), tag.label)).join(' ');
+}
+
+function idTagReferences(record) {
+  return record.tags.map(label => {
+    const matches = STATE.result.audit.tags.filter(t => t.label === label && record.where.indexOf(t.where) >= 0);
+    return matches.length ? tagReferences(matches) : esc(label);
+  }).join(', ');
+}
+
+function liveVendorTags(vendor) {
+  const tags = STATE.result ? STATE.result.audit.tags.filter(t => t.platform === vendor || t.vendor === vendor) : [];
+  return tags.length ? `<div class="tag-references"><span class="sub">Related container tags (firing unverified)</span>${tagReferences(tags)}</div>` : '';
+}
+
+function tagIndexForRow(g, row, index) {
+  if (g.tagIndices && Number.isInteger(g.tagIndices[index])) return g.tagIndices[index];
+  if (!g.isTag) return -1;
+  return STATE.result.audit.tags.findIndex(t => t.where === row[2] &&
+    (t.label === row[1] || t.label === String(row[1]).replace(/^\S+\s/, '')));
+}
+
+function issueTagReferences(issue) {
+  const tags = STATE.result.audit.tags.filter(t => (issue.items || []).some(item =>
+    item === t.label || String(item).indexOf(t.label + ':') === 0) ||
+    issue.where === t.where || String(issue.where).indexOf(t.where + ' · ') === 0);
+  return tags.length ? `<div class="tag-references">${tagReferences(tags)}</div>` : '';
+}
+
+function tagConfigurationSection(title, value) {
+  if (value == null || (Array.isArray(value) && !value.length)) return '';
+  return `<section class="tag-config-section"><h3>${esc(title)}</h3>
+    <pre tabindex="0"><code>${esc(typeof value === 'string' ? value : JSON.stringify(value, null, 2))}</code></pre></section>`;
+}
+
+function configurationLabel(key, owner) {
+  const labels = {
+    tagId: 'Tag ID', measurementId: 'Measurement ID', measurementIdOverride: 'Measurement ID override',
+    eventName: 'Event name', html: 'HTML', javascript: 'JavaScript',
+    dataLayerVersion: 'Data Layer Version', setDefaultValue: 'Set default value', defaultValue: 'Default value',
+    configSettingsTable: 'Configuration settings', fieldsToSet: 'Fields to set',
+    eventSettingsTable: 'Event parameters', eventParameters: 'Event parameters',
+    eventSettingsVariable: 'Event Settings Variable', configSettingsVariable: 'Configuration Settings Variable',
+    parameter: 'Parameter', parameterValue: 'Value', fieldName: 'Field name',
+    conversionId: 'Conversion ID', conversionLabel: 'Conversion label', value: 'Value',
+    sendEcommerceData: 'Send Ecommerce data', getEcommerceDataFrom: 'Data source',
+    ecommerceMacroData: 'Ecommerce object',
+    input: 'Input variable', map: 'Lookup table', fullUrl: 'Full URL', url: 'URL',
+    enableSupportDocumentWrite: 'Support document.write', tagFiringOption: 'Tag firing options',
+    firingTriggerId: 'Firing triggers', blockingTriggerId: 'Exceptions', triggerIds: 'Triggers'
+  };
+  if (key === 'measurementIdOverride' && owner && owner.type === 'gaawe') return 'Measurement ID';
+  if (key === 'parameter' && owner && owner.type === 'gaawe') return 'Event Parameter';
+  if (key === 'name' && owner && owner.type === 'v') return 'Data Layer Variable Name';
+  if (owner && ['smm', 'remm'].includes(owner.type)) {
+    if (key === 'key') return owner.type === 'remm' ? 'Pattern' : 'Input';
+    if (key === 'value') return 'Output';
+    if (key === 'map' && owner.type === 'remm') return 'RegEx table';
+  }
+  return labels[key] || String(key).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/_/g, ' ')
+    .replace(/^./, c => c.toUpperCase());
+}
+
+function configurationItems(kind, owner) {
+  const source = owner.source || (owner.inspection && owner.inspection.source);
+  return ((STATE.result && STATE.result.audit[kind]) || []).map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => entry.source === source && (owner.container ? entry.container === owner.container
+      : owner.where === entry.container || String(owner.where).startsWith(entry.container + ' ·')));
+}
+
+function configurationText(value, owner) {
+  const variables = configurationItems('variables', owner);
+  return String(value == null ? '' : value).split(/(\{\{[^{}]+\}\})/g).map(part => {
+    const match = /^\{\{([^{}]+)\}\}$/.exec(part);
+    const variable = match && variables.find(({ entry }) => entry.name === match[1]);
+    return variable ? `<span class="configuration-reference">${entityToggle('variables', variable.index, part)}</span>` : esc(part);
+  }).join('');
+}
+
+function configurationValue(parameter, owner) {
+  if (parameter.type === 'list') {
+    const list = parameter.list || [];
+    if (!list.length) return '<span class="sub">No entries configured</span>';
+    if (list.every(item => item.type === 'map')) {
+      const keys = Array.from(new Set(list.flatMap(item => (item.map || []).map(field => field.key))));
+      return `<div class="configuration-table"><table><thead><tr>${keys.map(key =>
+        `<th>${esc(configurationLabel(key, owner))}</th>`).join('')}</tr></thead><tbody>${list.map(item =>
+        `<tr>${keys.map(key => {
+          const field = (item.map || []).find(field => field.key === key);
+          return `<td>${field ? configurationValue(field, owner) : ''}</td>`;
+        }).join('')}</tr>`).join('')}</tbody></table></div>`;
+    }
+    return `<ul class="configuration-list">${list.map(item => `<li>${configurationValue(item, owner)}</li>`).join('')}</ul>`;
+  }
+  if (parameter.type === 'map') return configurationParameters(parameter.map || [], owner);
+  if (parameter.type === 'triggerReference') {
+    const trigger = configurationItems('triggers', owner).find(({ entry }) => String(entry.id) === String(parameter.value));
+    if (trigger) return entityToggle('triggers', trigger.index, trigger.entry.name);
+  }
+  return configurationText(parameter.value, owner);
+}
+
+function configurationParameters(parameters, owner) {
+  return `<dl class="configuration-fields">${parameters.map(parameter =>
+    parameter.key === 'sendEcommerceData' && ['true', 'false'].includes(String(parameter.value))
+      ? `<div class="configuration-check"><dt>${esc(configurationLabel(parameter.key, owner))}</dt><dd><span aria-hidden="true">${String(parameter.value) === 'true'
+        ? '<svg viewBox="0 0 16 16" width="16" height="16"><path d="m3 8 3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>'
+        : '&#8722;'}</span><span class="configuration-accessible">${String(parameter.value) === 'true' ? 'Enabled' : 'Disabled'}</span></dd></div>`
+      : `<div><dt>${esc(configurationLabel(parameter.key || parameter.type, owner))}</dt><dd>${['html', 'javascript'].includes(parameter.key)
+      ? tagConfigurationSection(parameter.key === 'html' ? 'HTML' : 'JavaScript', parameter.value)
+      : parameter.key === 'dataLayerVersion' && owner.type === 'v' ? 'Version ' + esc(parameter.value)
+      : parameter.key === 'getEcommerceDataFrom' && parameter.value === 'dataLayer' ? 'Data Layer'
+      : configurationValue(parameter, owner)}</dd></div>`).join('')}</dl>`;
+}
+
+function configurationSection(title, content) {
+  return `<section class="configuration-section"><h4>${esc(title)}</h4>${content}</section>`;
+}
+
+function tagConfigurationParameters(parameters, tag) {
+  const sections = [
+    ['Configuration settings', ['configSettingsVariable', 'configSettingsTable', 'fieldsToSet']],
+    [tag.type === 'gaawe' ? 'Event Parameters' : 'Shared event settings', ['eventSettingsVariable', 'eventSettingsTable', 'eventParameters']],
+    ['Ecommerce', ['sendEcommerceData', 'getEcommerceDataFrom', 'ecommerceMacroData']]
+  ];
+  const grouped = new Set(sections.flatMap(section => section[1]));
+  return configurationParameters(parameters.filter(p => !grouped.has(p.key)), tag) +
+    sections.map(([title, keys]) => {
+      const fields = parameters.filter(p => keys.includes(p.key));
+      return fields.length ? configurationSection(title, configurationParameters(fields, tag)) : '';
+    }).join('');
+}
+
+function configurationCard(title, content) {
+  return `<section class="configuration-card"><h3>${esc(title)}</h3>${content}</section>`;
+}
+
+function moreConfigurationDetails(content) {
+  return `<details class="configuration-more"><summary class="btn secondary">More details</summary>${content}</details>`;
+}
+
+function configurationType(label, type, kind) {
+  const analytics = kind === 'Tag' && ['gaawe', 'gaawc'].includes(type);
+  const paths = analytics
+    ? '<path d="M5 15v4M12 9v10M19 3v16" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>'
+    : kind === 'Trigger' ? '<path d="m9 7-5 5 5 5m6-10 5 5-5 5" fill="none" stroke="currentColor" stroke-width="2"/>'
+      : '<path d="m3 8 9-5 9 5-9 5-9-5Zm0 5 9 5 9-5M3 18l9 5 9-5" fill="none" stroke="currentColor" stroke-width="1.5"/>';
+  const provider = kind === 'Tag' && ['gaawe', 'gaawc'].includes(type) ? 'Google Analytics'
+    : kind === 'Tag' && type === 'googtag' ? 'Google' : '';
+  return `<div class="configuration-type"><span class="configuration-type-label">${esc(kind)} Type</span>
+    <div class="configuration-type-row"><span class="configuration-icon${analytics ? ' analytics' : kind === 'Trigger' ? ' trigger' : ''}" aria-hidden="true">
+      <svg viewBox="0 0 24 26" width="24" height="26">${paths}</svg></span>
+      <div><strong>${esc(type === 'gaawe' ? 'Google Analytics: GA4 Event' : label)}</strong>${provider ? `<span class="sub">${provider}</span>` : ''}</div>
+    </div></div>`;
+}
+
+function tagDetailContent(tag) {
+  const detail = tag.inspection;
+  const configuration = detail && detail.format === 'api' && detail.configuration;
+  if (!configuration) return `<div class="tag-detail-content"><h2>${esc(tag.label)}</h2>
+    <p class="hint">A GTM-style configuration view requires an API source or container export. ${detail
+      ? 'Published data does not contain the original authoring settings.' : 'Original configuration was not saved in this audit. Re-run the audit for complete details.'}</p>
+    ${moreConfigurationDetails(tagTechnicalContent(tag))}</div>`;
+  const template = (detail.templates || []).find(t => t.name);
+  const typeName = (GTM_TAGS[tag.type] && GTM_TAGS[tag.type].name) || (template && template.name) || tag.type;
+  const triggers = configurationItems('triggers', tag);
+  const triggerList = (ids, names, empty) => (ids || []).length
+    ? `<ul class="inventory-references">${ids.map((id, i) => {
+      const match = triggers.find(({ entry }) => String(entry.id) === String(id));
+      return `<li>${match ? entityToggle('triggers', match.index, match.entry.name)
+        : esc((names || [])[i] || BUILT_IN_TRIGGERS[id] || 'Trigger ' + id)}</li>`;
+    }).join('')}</ul>` : `<p>${esc(empty)}</p>`;
+  const consent = configuration.consentSettings;
+  const consentLabel = !consent || !consent.consentStatus || consent.consentStatus === 'notSet' ? 'Not set'
+    : consent.consentStatus === 'notNeeded' ? 'No additional consent required'
+      : consent.consentStatus === 'needed' ? 'Require additional consent for tag to fire' : consent.consentStatus;
+  return `<div class="tag-detail-content configuration-view"><h2>${esc(tag.label)}</h2>
+    <p class="hint">Read-only GTM configuration. Variable references are not evaluated; configuration is not proof of firing.</p>
+    ${tag.paused ? '<p class="hint">This tag is paused.</p>' : ''}
+    ${configurationCard('Tag Configuration', configurationType(typeName, tag.type, 'Tag') +
+      tagConfigurationParameters(configuration.parameter || [], tag) +
+      configurationSection('Consent Settings', `<dl class="configuration-fields"><div><dt>Additional Consent Checks</dt><dd>${esc(consentLabel)}</dd></div>
+      ${consent && consent.consentType ? `<div><dt>Consent types</dt><dd>${configurationValue(consent.consentType, tag)}</dd></div>` : ''}</dl>
+      <p class="hint">Built-in consent checks are not supplied as an authoritative list by this source. Verify them in GTM.</p>`))}
+    ${configurationCard('Triggering', `<h4>Firing Triggers</h4>${triggerList(configuration.firingTriggerId, tag.firesOn,
+      'No firing triggers configured. Tag sequencing may still invoke this tag.')}
+      ${(configuration.blockingTriggerId || []).length ? `<h4>Exceptions</h4>${triggerList(configuration.blockingTriggerId, tag.blockedBy, '')}` : ''}`)}
+    ${configurationCard('Advanced Settings', configurationParameters([
+      ...(configuration.tagFiringOption ? [{ key: 'tagFiringOption', value: ({
+        oncePerEvent: 'Once per event', oncePerLoad: 'Once per page', unlimited: 'Unlimited'
+      })[configuration.tagFiringOption] || configuration.tagFiringOption }] : []),
+      ...(configuration.setupTag ? [{ key: 'Setup tags', value: configuration.setupTag.map(t => t.tagName).join(', ') }] : []),
+      ...(configuration.teardownTag ? [{ key: 'Cleanup tags', value: configuration.teardownTag.map(t => t.tagName).join(', ') }] : [])
+    ], tag) + (tag.notes ? `<p>${esc(tag.notes)}</p>` : '') + '<p class="hint">Only supplied settings are shown. More details contains every original field.</p>')}
+    ${moreConfigurationDetails(tagTechnicalContent(tag))}</div>`;
+}
+
+function entityDetailContent(kind, entry) {
+  const title = kind === 'triggers' ? 'Trigger' : 'Variable';
+  if (entry.format !== 'api') return `<div class="tag-detail-content"><h2>${esc(entry.name)}</h2>
+    <p class="hint">Published-container representation only. Original GTM settings cannot be reconstructed. Unused status cannot be established from compiled data.</p>
+    ${moreConfigurationDetails(entityTechnicalContent(kind, entry))}</div>`;
+  const configuration = entry.configuration;
+  const template = (entry.templates || []).find(t => t.name);
+  let settings = configurationType(entry.builtIn ? entry.name : (template && template.name) || entry.typeLabel, entry.type, title) +
+    configurationParameters(configuration.parameter || [], entry);
+  if (kind === 'triggers') {
+    const filters = [['customEventFilter', 'Event name conditions'], ['autoEventFilter', 'Enable this trigger when'],
+      ['filter', 'This trigger fires on']];
+    settings += filters.map(([key, label]) => {
+      const conditions = configuration[key] || [];
+      if (key === 'customEventFilter' && configuration.type === 'customEvent' && conditions.length === 1) {
+        const condition = conditions[0];
+        const arg = name => (condition.parameter || []).find(p => p.key === name) || {};
+        if (['{{_event}}', '{{Event}}'].includes(arg('arg0').value) &&
+            ['equals', 'matchRegex'].includes(condition.type) && !['true', true].includes(arg('negate').value)) {
+          return configurationParameters([{ key: 'eventName', value: arg('arg1').value }], entry) +
+            (condition.type === 'matchRegex' ? `<p class="configuration-option">Use regex matching${String(arg('ignore_case').value) === 'true' ? ' (ignore case)' : ''}</p>` : '');
+        }
+      }
+      return conditions.length ? `<h4>${esc(label)}</h4><ul class="configuration-list">${conditions.map(condition => {
+        const parameters = condition.parameter || [];
+        const arg = name => parameters.find(p => p.key === name) || {};
+        return `<li>${configurationValue(arg('arg0'), entry)} <strong>${String(arg('negate').value) === 'true' ? 'not ' : ''}${esc(API_OPS[condition.type] || condition.type)}</strong>
+          ${configurationValue(arg('arg1'), entry)}${String(arg('ignore_case').value) === 'true' ? ' (ignore case)' : ''}</li>`;
+      }).join('')}</ul>` : '';
+    }).join('');
+  }
+  const metadata = new Set(['name', 'type', 'parameter', 'filter', 'autoEventFilter', 'customEventFilter',
+    'accountId', 'containerId', 'triggerId', 'variableId', 'fingerprint', 'path', 'parentFolderId', 'tagManagerUrl']);
+  const extra = Object.entries(configuration).filter(([key]) => !metadata.has(key));
+  settings += configurationParameters(extra.map(([key, value]) => ({
+    key, value: typeof value === 'object' && value !== null ? renderApiParam_(value) || JSON.stringify(value) : value
+  })), entry);
+  const usage = entityUsage(entry);
+  return `<div class="tag-detail-content configuration-view"><h2>${esc(entry.name)}</h2>
+    <p class="hint">Read-only GTM configuration. Variable references and code are not executed.</p>
+    ${configurationCard(title + ' Configuration', settings + (entry.builtIn ? '<p class="hint">Built-in GTM item; no editable settings are supplied.</p>' : ''))}
+    ${configurationCard('References', `<p><span class="sev ${usage.style}">${usage.label}</span></p>
+      <p class="hint">Static references include paused tags, not proof of execution. Review before deleting an unused item.</p>
+      ${entry.usage.length ? `<h4>Referenced by</h4><ul class="inventory-references">${entry.usage.map(inventoryReference).join('')}</ul>`
+        : '<p>No other items reference this definition in the supplied snapshot.</p>'}`)}
+    ${moreConfigurationDetails(entityTechnicalContent(kind, entry))}</div>`;
+}
+
+function tagTechnicalContent(tag) {
+  const detail = tag.inspection;
+  const info = [
+    ['Location', tag.where], ['Tag type', tag.type], ['Platform / vendor', joinParts_(tag.platform, tag.vendor)],
+    ['Status', tag.paused ? 'Paused' : 'Enabled (not proof of firing)'], ['Folder', tag.folder],
+    ['Purpose', tag.purpose], ['Consent risk', tag.risk], ['Consent handling', tag.handling],
+    ['Additional consent checks', (tag.additionalChecks || []).join(', ')],
+    ['Consent explicitly not needed', tag.consentNotNeeded ? 'Yes' : 'No'],
+    ['Firing triggers', (tag.firesOn || []).join(' OR ')], ['Exceptions', (tag.blockedBy || []).join(' OR ')],
+    ['Tag sequencing', tag.sequence || (tag.sequenced ? 'Used by tag sequencing' : '')],
+    ['Notes', tag.notes], ['Recommendation', tag.recommendation], ['AI explanation', tag.ai && tag.ai.what]
+  ];
+  const limit = !detail
+    ? 'Original configuration was not saved in this audit. The analysis text below may be truncated. Re-run with a GTM API source or container export for complete details.'
+    : detail.format === 'compiled'
+      ? 'Published-container detail: original names and authoring settings are not included. Code below is the compiled HTML representation; variable references may be rendered as placeholders. Raw compiled configuration is preserved below.'
+      : detail.format === 'limited'
+        ? 'Partial published-container parsing: this is an extracted fragment, not guaranteed to be the complete tag or code. Use the GTM API or an export for full detail.'
+        : 'Original GTM API / export configuration. Variable references are not executed or replaced. These are configuration details, not evidence that the tag fired.';
+  return `<div class="tag-detail-content">
+    <h2>${esc(tag.label)}</h2><p class="hint">${esc(limit)}</p>
+    ${detail ? `<p class="hint">Source: ${esc(detail.source)}</p>` : ''}
+    ${detail && /^cvt_/.test(tag.type) && !(detail.templates || []).length
+      ? '<p class="hint">The custom template implementation is not included in this source. Only its available tag settings can be shown.</p>' : ''}
+    <dl class="tag-facts">${info.filter(pair => pair[1] != null && pair[1] !== '').map(pair =>
+      `<div><dt>${esc(pair[0])}</dt><dd>${esc(pair[1])}</dd></div>`).join('')}</dl>
+    ${detail ? tagConfigurationSection(detail.format === 'api' ? 'Custom HTML / code (as configured)' : 'Compiled HTML / code', detail.code) +
+      tagConfigurationSection('Complete tag configuration available from this source', detail.configuration) +
+      tagConfigurationSection('Firing and exception trigger configurations', detail.triggers) +
+      tagConfigurationSection('Compiled conditions', detail.predicates) +
+      tagConfigurationSection('Referenced variables (including their configuration / code)', detail.variables) +
+      tagConfigurationSection('Setup / cleanup tag configurations', detail.sequence) +
+      tagConfigurationSection('Custom template definitions', detail.templates)
+      : tagConfigurationSection('Saved analysis text (may be incomplete)', tag.text)}
+  </div>`;
+}
+
+function toggleTagDetail(button) {
+  const tag = STATE.result.audit.tags[Number(button.dataset.tagIndex)];
+  if (!tag) { toast('Tag details are no longer available. Refresh this view.', true); return; }
+  toggleDetailPanel(button, 'Tag details: ' + tag.label, () => tagDetailContent(tag));
+}
+
+function toggleEntityDetail(button) {
+  const kind = button.dataset.entityKind;
+  const entry = ['triggers', 'variables'].includes(kind) &&
+    (STATE.result.audit[kind] || [])[Number(button.dataset.entityIndex)];
+  if (!entry) { toast('Configuration details are no longer available. Re-run the audit.', true); return; }
+  toggleDetailPanel(button, (kind === 'triggers' ? 'Trigger' : 'Variable') + ' details: ' + entry.name,
+    () => entityDetailContent(kind, entry));
+}
+
+function toggleDetailPanel(button, label, content) {
+  const control = button.getAttribute('aria-controls');
+  if (control) {
+    const region = document.getElementById(control);
+    if (region) (region.parentElement.matches('.tag-detail-row > td') ? region.parentElement.parentElement : region).remove();
+    button.removeAttribute('aria-controls');
+    button.setAttribute('aria-expanded', 'false');
+    return;
+  }
+  const id = 'tag-detail-' + (++tagPanelId);
+  const row = button.closest('.tag-detail-panel') ? null : button.closest('tr');
+  const tableWrap = row && row.closest('.table-wrap');
+  if (tableWrap) tableWrap.classList.add('tag-detail-table');
+  const panel = document.createElement(row ? 'tr' : 'div');
+  if (row) {
+    panel.className = 'tag-detail-row';
+    const cell = document.createElement('td');
+    cell.colSpan = row.children.length;
+    panel.appendChild(cell);
+  }
+  const region = row ? document.createElement('div') : panel;
+  region.id = id;
+  region.className = 'tag-detail-panel';
+  region.setAttribute('role', 'region');
+  region.setAttribute('aria-label', label);
+  region.innerHTML = content();
+  if (row) panel.firstChild.appendChild(region);
+  const anchor = row || button.closest('p, li, h1, h2, h3, h4, h5, .tag-references, .msg, .doc') || button;
+  if (anchor.matches('li, .msg, .doc')) anchor.appendChild(panel);
+  else anchor.insertAdjacentElement('afterend', panel);
+  button.setAttribute('aria-controls', id);
+  button.setAttribute('aria-expanded', 'true');
+  if (tableWrap) tableWrap.scrollLeft = 0;
+}
+
+function tagMentions(html) {
+  const root = document.createElement('div');
+  root.innerHTML = html;
+  const tags = STATE.result ? STATE.result.audit.tags : [];
+  const labels = Array.from(new Set(tags.map(t => t.label).filter(label => label.length >= 4))).sort((a, b) => b.length - a.length);
+  if (!labels.length) return root.innerHTML;
+  const pattern = new RegExp(labels.map(escapeRegex_).join('|'), 'g');
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) {
+    if (!walker.currentNode.parentElement.closest('pre, code, button')) nodes.push(walker.currentNode);
+  }
+  nodes.forEach(node => {
+    pattern.lastIndex = 0;
+    let match, start = 0;
+    const parts = [];
+    while ((match = pattern.exec(node.textContent))) {
+      parts.push(esc(node.textContent.slice(start, match.index)));
+      const matches = tags.filter(t => t.label === match[0]);
+      parts.push(matches.map(t => tagToggle(tags.indexOf(t), matches.length > 1 ? t.label + ' (' + t.where + ')' : t.label)).join(' '));
+      start = match.index + match[0].length;
+    }
+    if (!parts.length) return;
+    parts.push(esc(node.textContent.slice(start)));
+    const span = document.createElement('span');
+    span.innerHTML = parts.join('');
+    node.replaceWith(span);
+  });
+  return root.innerHTML;
+}
+
+function auditMarkdown(text) { return tagMentions(renderMarkdown(text)); }
 
 function reportHeader(r) {
   const title = r.meta.client || hostOf_(r.meta.site) || 'Tag audit';
@@ -514,7 +933,7 @@ function areasTable(r) {
         <td><strong>${esc(a.area)}</strong></td>
         <td>${a.score === null ? '<span class="sub">n/a</span>' : a.score + '<div class="bar' + cls + '"><i style="width:' + a.score + '%"></i></div>'}</td>
         <td>${a.top ? `<span class="sev ${esc(a.top)}">${esc(a.status)}</span>` : esc(a.status)}</td>
-        <td class="wrap">${a.findings.length ? a.findings.map(f => esc(f)).join('<br>') : '<span class="sub">—</span>'}</td>
+        <td class="wrap">${a.findings.length ? a.findings.map(f => tagMentions(esc(f))).join('<br>') : '<span class="sub">—</span>'}</td>
         <td class="wrap">${esc(a.action)}</td></tr>`;
     }).join('')}</tbody></table></div>`;
 }
@@ -525,9 +944,9 @@ function actionsTable(r) {
     <thead><tr><th>#</th><th>Severity</th><th>Area</th><th>Finding</th><th>Action</th><th>Where</th></tr></thead>
     <tbody>${r.issues.map((x, n) => `<tr>
       <td>${n + 1}</td><td><span class="sev ${esc(x.severity)}">${esc(x.severity)}</span></td><td>${esc(x.area)}</td>
-      <td class="wrap">${x.severity === 'High' ? '<span class="hl-mark">' + esc(x.finding) + '</span>' : esc(x.finding)}</td>
+      <td class="wrap">${x.severity === 'High' ? '<span class="hl-mark">' + tagMentions(esc(x.finding)) + '</span>' : tagMentions(esc(x.finding))}</td>
       <td class="wrap">${esc(x.action)}</td>
-      <td class="wrap">${esc(x.where)}${x.items && x.items.length ? '<span class="sub">' + esc(truncate_(x.items.join(', '), 260)) + '</span>' : ''}</td></tr>`).join('')}
+      <td class="wrap">${esc(x.where)}${x.items && x.items.length ? '<span class="sub">' + esc(truncate_(x.items.join(', '), 260)) + '</span>' : ''}${issueTagReferences(x)}</td></tr>`).join('')}
     </tbody></table></div>`;
 }
 
@@ -562,7 +981,7 @@ function consentTable(rows) {
     <thead><tr><th>Risk</th><th>Tag</th><th>Platform / vendor</th><th>Purpose</th><th>Fires on</th><th>Consent handling found</th><th>Recommendation</th></tr></thead>
     <tbody>${rows.map(t => `<tr>
       <td><span class="sev ${sevClass(t.risk)}">${esc(t.risk === '—' ? 'Paused' : t.risk)}</span></td>
-      <td class="wrap"><strong>${esc(t.label)}</strong><span class="sub">${esc(t.where)}</span></td>
+      <td class="wrap"><strong>${tagToggle(STATE.result.audit.tags.indexOf(t), t.label)}</strong><span class="sub">${esc(t.where)}</span></td>
       <td>${esc(t.platform)}${t.vendor && t.platform.indexOf(t.vendor) < 0 ? '<span class="sub">' + esc(t.vendor) + '</span>' : ''}</td>
       <td>${esc(t.purpose)}</td>
       <td class="wrap">${esc(truncate_((t.firesOn || []).join(' OR ') || (t.noTrigger ? 'No trigger' : ''), 200))}${t.blockedBy && t.blockedBy.length ? '<span class="sub">Blocked by: ' + esc(truncate_(t.blockedBy.join(' OR '), 120)) + '</span>' : ''}</td>
@@ -609,22 +1028,31 @@ function renderConsent() {
 // ══════════════════════════════════════════════════════════════════
 
 function groupBlock(g, query, open) {
-  const rows = g.rows.filter(row => !query || row.join(' ').toLowerCase().indexOf(query) >= 0);
+  const rows = g.rows.map((row, index) => ({ row: row, tagIndex: tagIndexForRow(g, row, index),
+    entity: g.entityRefs && g.entityRefs[index] }))
+    .filter(item => !query || item.row.join(' ').toLowerCase().indexOf(query) >= 0);
   if (!rows.length) return '';
   const name = g.logo && g.plain ? g.plain : g.name;
   return `<details class="group" ${open ? 'open' : ''} style="--g:${esc(g.header)}">
     <summary>${g.logo ? `<img src="${esc(g.logo)}" alt="" loading="lazy" onerror="this.remove()">` : ''}<span class="gname">${esc(name)}</span><span class="gcount">${rows.length} ${rows.length === 1 ? 'item' : 'items'}</span></summary>
     <div class="table-wrap" style="border:0;border-radius:0"><table>
       <thead><tr><th>Type</th><th>Item</th><th>Location</th><th>Details</th><th>Notes</th></tr></thead>
-      <tbody>${rows.map(row => `<tr><td>${esc(g.isTag ? String(row[0]).replace(/^🏷️\s*/, '') : row[0])}</td><td class="wrap"><strong>${esc(row[1])}</strong></td><td>${esc(row[2])}</td>
-        <td class="wrap">${esc(row[3])}</td><td class="wrap">${esc(row[4])}</td></tr>`).join('')}</tbody>
+      <tbody>${rows.map(item => {
+        const row = item.row;
+        const entity = item.entity && (STATE.result.audit[item.entity.kind] || [])[item.entity.index];
+        const usage = entity && entityUsage(entity);
+        const control = entity ? entityToggle(item.entity.kind, item.entity.index, row[1]) : tagToggle(item.tagIndex, row[1]);
+        return `<tr><td>${esc(g.isTag ? String(row[0]).replace(/^🏷️\s*/, '') : row[0])}</td><td class="wrap"><strong>${control}</strong>${usage ? `<span class="sub"><span class="sev ${usage.style}">${usage.label}</span></span>` : ''}</td><td>${esc(row[2])}</td>
+        <td class="wrap">${tagMentions(esc(row[3]))}</td><td class="wrap">${tagMentions(esc(row[4]))}</td></tr>`;
+      }).join('')}</tbody>
     </table></div></details>`;
 }
 
-function renderGroupsView(title, lede, groups, idPrefix) {
+function renderGroupsView(title, lede, groups, idPrefix, sections) {
   $('#view').innerHTML = `
     <h1>${esc(title)}</h1><p class="lede">${esc(lede)}</p>
     <div class="toolbar">
+      ${sections || ''}
       <input type="search" id="${idPrefix}-q" placeholder="Search" aria-label="Search">
       <button class="link" data-act="expand">Expand all</button><button class="link" data-act="collapse">Collapse all</button>
       <button class="btn secondary" data-act="csv-findings">Download all findings (CSV)</button>
@@ -637,12 +1065,51 @@ function renderGroupsView(title, lede, groups, idPrefix) {
 }
 
 function renderTags() {
-  const groups = STATE.result.groups.filter(g => g.isTag);
-  renderGroupsView('Tags by platform', 'Every GTM tag, grouped by the platform it sends data to. Tags the AI identified appear in their own groups.', groups, 'tags');
+  const section = STATE.tagSection;
+  const isTags = section === 'tags';
+  const groups = isTags ? STATE.result.groups.filter(g => g.isTag) : inventoryGroups(section);
+  const title = isTags ? 'Tags by platform' : section === 'triggers' ? 'Triggers' : 'Variables';
+  const lede = isTags ? 'Every GTM tag, grouped by the platform it sends data to. Tags the AI identified appear in their own groups.'
+    : 'Click an item to inspect its complete available configuration and references. Unused means no other item references it in the supplied API/export snapshot, not proof it is safe to delete.';
+  const sections = `<div class="seg container-sections" role="group" aria-label="Container items">${['tags', 'triggers', 'variables'].map(kind =>
+    `<button data-act="container-section" data-section="${kind}" aria-pressed="${section === kind}">${kind === 'tags' ? 'Tags' : kind === 'triggers' ? 'Triggers' : 'Variables'}</button>`).join('')}</div>`;
+  renderGroupsView(title, lede, groups, 'tags', sections);
+  if (!isTags) {
+    const entries = STATE.result.audit[section];
+    if (!entries || !entries.length) {
+      $('#tags-list').innerHTML = `<div class="empty"><h3>No ${esc(section)} definitions available</h3>${entries
+        ? 'No definitions were available from the scanned sources. Add a GTM API source or container export for original definitions and unused checks.'
+        : 'This saved audit predates the inventory. Re-run with a GTM API source or container export to capture every definition, including unused items.'}</div>`;
+    } else if (entries.some(e => !e.usageKnown)) {
+      $('#tags-list').insertAdjacentHTML('beforebegin', '<p class="notice">Published data contains compiled rules and variables, not the complete authoring inventory. Unused checks are not available for those items.</p>');
+    }
+    return;
+  }
   if (!groups.length) {
     $('#tags-list').innerHTML = '<div class="empty"><h3>No tags in what was scanned</h3>If you read a container through the API, its live version may be empty or unpublished. ' +
       'On <button class="link" data-act="goto" data-view="audit">New audit</button>, click Load workspaces, choose a workspace under "Version to audit" and run the audit again.</div>';
   }
+}
+
+function inventoryGroups(kind) {
+  const groups = new Map();
+  (STATE.result.audit[kind] || []).forEach((entry, index) => {
+    const key = JSON.stringify([entry.container, entry.source]);
+    if (!groups.has(key)) groups.set(key, {
+      name: entry.container + ' · ' + entry.source, header: '#60758C', isTag: false, rows: [], entityRefs: []
+    });
+    const group = groups.get(key);
+    let description = 'Published compiled representation; original name unavailable';
+    if (entry.format === 'api') {
+      description = kind === 'triggers' ? describeApiTrigger_(entry.configuration, '', [])[3]
+        : variableKeyInfo_(entry.type, apiAdapter_(entry.configuration.parameter, {})) || entry.typeLabel;
+    }
+    group.rows.push([entry.typeLabel, entry.name, joinParts_(entry.container, entry.folder),
+      description, entry.usage.length ? entry.usage.length + ' reference(s)' :
+        entry.usageKnown ? 'Unused: no other item references this definition. Review before deleting.' : 'Usage not checked']);
+    group.entityRefs.push({ kind: kind, index: index });
+  });
+  return Array.from(groups.values());
 }
 
 function renderFindings() {
@@ -657,10 +1124,8 @@ function idRows(r) {
   const ids = Object.keys(r.audit.ids).map(k => r.audit.ids[k]).sort((a, b) => a.platform.localeCompare(b.platform) || a.id.localeCompare(b.id));
   const counts = {};
   ids.filter(x => x.live).forEach(x => { counts[x.platform] = (counts[x.platform] || 0) + 1; });
-  const approved = String(r.meta.settings.approvedIds || '').split(/[,;\n]/).map(x => x.trim().toUpperCase()).filter(Boolean);
   return ids.map(x => ({
-    rec: x, key: x.platform + '|' + x.id,
-    approved: approved.length ? (approved.indexOf(x.id.toUpperCase()) >= 0 ? 'Yes' : 'No') : '—',
+    rec: x,
     note: joinParts_(x.live && SINGLE_ID_PLATFORMS.has(x.platform) && counts[x.platform] > 1 && counts[x.platform] + ' ' + x.platform + ' IDs live — confirm all are the client\'s',
                      !x.live && 'Only in paused tags')
   }));
@@ -674,21 +1139,31 @@ function renderIds() {
     <p class="lede">Every account, pixel and measurement ID found. Ask the client to confirm they own each one; extra IDs are often left by a previous agency or a test setup.</p>
     <div class="toolbar"><button class="btn secondary" data-act="csv-ids">Download CSV</button></div>
     ${rows.length ? `<div class="table-wrap"><table>
-      <thead><tr><th>Platform</th><th>ID</th><th>Type</th><th>Status</th><th>Used by</th><th>Approved</th><th>Client confirms</th><th>Notes</th></tr></thead>
+      <thead><tr><th>Platform</th><th>ID</th><th>Type</th><th>Status</th><th>Used by</th><th>Notes</th></tr></thead>
       <tbody>${rows.map(x => `<tr>
         <td>${esc(x.rec.platform)}</td><td><code>${esc(x.rec.id)}</code></td><td>${esc(x.rec.kind)}</td>
         <td>${x.rec.live ? 'Live' : '<span class="sub">Paused only</span>'}</td>
-        <td class="wrap">${esc(truncate_(x.rec.tags.join(', '), 200))}<span class="sub">${esc(truncate_(x.rec.where.join(', '), 160))}</span></td>
-        <td>${x.approved === 'No' ? '<span class="sev Medium">No</span>' : esc(x.approved)}</td>
-        <td><input type="checkbox" data-confirm="${esc(x.key)}" ${STATE.confirmations[x.key] ? 'checked' : ''} aria-label="Client confirms ${esc(x.rec.id)}"></td>
-        <td class="wrap">${x.note ? '<span class="hl-mark">' + esc(x.note) + '</span>' : ''}</td></tr>`).join('')}
+        <td class="wrap">${idTagReferences(x.rec)}<span class="sub">${esc(truncate_(x.rec.where.join(', '), 160))}</span></td>
+        <td class="wrap">${esc(x.note)}</td></tr>`).join('')}
       </tbody></table></div>` : '<div class="empty">No account or pixel IDs were found.</div>'}`;
-  $$('[data-confirm]').forEach(cb => cb.addEventListener('change', () => { STATE.confirmations[cb.dataset.confirm] = cb.checked; }));
 }
 
 // ══════════════════════════════════════════════════════════════════
 //  VIEW: LIVE CONSENT TEST
 // ══════════════════════════════════════════════════════════════════
+
+function liveActivityCell(text, verdict) {
+  const warning = /^⚠️/.test(text) && verdict === 'High';
+  const parts = text.replace(/^(?:⚠️|✔|ℹ️|⚪)\s*/, '').split(' · ');
+  const inactive = text === 'No activity' || text === 'Not tested';
+  return `<div class="live-activity${warning ? ' live-activity-high' : ''}${inactive ? ' live-activity-muted' : ''}">
+    <span class="live-activity-title">${warning ? '<span class="live-risk-label">Without consent</span>' : ''}${esc(parts[0])}</span>
+    ${parts.slice(1).map(part => part.indexOf('cookies: ') === 0
+      ? `<span class="live-cookie-label">Cookies observed</span><ul class="live-cookies">${part.slice(9).split(', ').map(name =>
+        `<li><code>${esc(name)}</code></li>`).join('')}</ul>`
+      : `<span class="live-signal">${esc(part)}</span>`).join('')}
+  </div>`;
+}
 
 function liveSection(live) {
   const st = live.data.stages;
@@ -701,17 +1176,55 @@ function liveSection(live) {
       <thead><tr><th>Google consent signal</th>${Object.keys(LIVE_STAGES).map(k => `<th>${esc(LIVE_STAGES[k])}</th>`).join('')}</tr></thead>
       <tbody><tr><td>gcs</td>${Object.keys(LIVE_STAGES).map(k => `<td><code>${esc(st[k] ? (st[k].gcs.join(' / ') || '—') : 'not tested')}</code></td>`).join('')}</tr></tbody>
     </table></div>
-    <div class="table-wrap"><table>
-      <thead><tr><th>Vendor</th><th>Purpose</th>${Object.keys(LIVE_STAGES).map(k => `<th>${esc(LIVE_STAGES[k])}</th>`).join('')}<th>Verdict</th><th>Recommendation</th></tr></thead>
+    <div class="table-wrap live-results"><table class="live-table" aria-label="Live consent observations by vendor">
+      <colgroup><col class="live-vendor-col"><col><col><col><col class="live-recommendation-col"></colgroup>
+      <thead><tr><th scope="col">Vendor / purpose</th>${Object.keys(LIVE_STAGES).map(k => `<th scope="col">${esc(LIVE_STAGES[k])}</th>`).join('')}<th scope="col">Verdict / recommendation</th></tr></thead>
       <tbody>${live.verdicts.map(v => `<tr>
-        <td><strong>${esc(v.vendor)}</strong></td><td>${esc(v.purpose)}</td>
-        ${Object.keys(LIVE_STAGES).map(k => `<td class="wrap">${/⚠️/.test(v.cells[k]) && v.verdict === 'High' ? '<span class="hl-mark">' + esc(v.cells[k]) + '</span>' : esc(v.cells[k])}</td>`).join('')}
-        <td><span class="sev ${esc(v.verdict)}">${esc(v.verdict)}</span></td><td class="wrap">${esc(v.recommendation)}</td></tr>`).join('')}
+        <th scope="row" class="live-vendor"><strong>${esc(v.vendor)}</strong><span class="sub">${esc(v.purpose)}</span>${liveVendorTags(v.vendor)}</th>
+        ${Object.keys(LIVE_STAGES).map(k => `<td data-stage="${esc(LIVE_STAGES[k])}">${liveActivityCell(v.cells[k], v.verdict)}</td>`).join('')}
+        <td class="live-recommendation"><span class="sev ${esc(v.verdict)}">${esc(v.verdict)}</span><p>${esc(v.recommendation)}</p></td></tr>`).join('')}
       </tbody></table></div>
     <h3>Unrecognised third parties</h3>
     <div class="table-wrap"><table><tbody>${Object.keys(LIVE_STAGES).map(k => `<tr><td style="width:200px">${esc(LIVE_STAGES[k])}</td>
       <td class="wrap">${esc(st[k] ? (st[k].other.join(', ') || 'None') : 'Not tested')}</td></tr>`).join('')}</tbody></table></div>
-    <p class="hint">gcs = G1[ad_storage][analytics_storage]: 1 granted, 0 denied. Only cookie names are read, never values. One browser session from one location; server-side tracking is not visible.</p>`;
+    <p class="hint">gcs = G1[ad_storage][analytics_storage]: 1 granted, 0 denied. Only cookie names are read, never values. Browser observations from one location; server-side tracking is not visible.</p>
+    ${runnerEvidence(st)}`;
+}
+
+function runnerImportControl() {
+  return `<p class="hint">Or use the local GTM-guided runner (Node.js + Playwright).
+    See <a href="runner/README.md" target="_blank" rel="noopener">setup instructions</a>.
+    Importing replaces the current live results.</p>
+    <label>Import local runner results<input type="file" data-runner-file accept=".runner.json,application/json"></label>`;
+}
+
+function runnerEvidence(stages) {
+  const keys = Object.keys(LIVE_STAGES).filter(k => stages[k] && stages[k].runner);
+  if (!keys.length) return '';
+  const first = stages[keys[0]].runner;
+  return `<h3>Local runner evidence</h3>
+    <p class="hint">${esc(first.container.id)} ${esc(first.container.name)}.
+      Actions are analyst-selected tests, not proof that individual GTM tags fired.
+      Confirm exact firing in GTM Preview / Tag Assistant.</p>
+    ${keys.map(k => {
+      const s = stages[k].runner.session;
+      const hosts = Array.from(new Set(s.requests.map(q => q.host)));
+      return `<details><summary>${esc(LIVE_STAGES[k])}: ${s.actions.length} action(s), ${s.requests.length} network attempt(s)</summary>
+        <p class="hint">${esc(s.consentConfirmation)}</p>
+        <div class="table-wrap"><table><thead><tr><th>Trigger to exercise</th><th>Action</th><th>Execution</th></tr></thead>
+        <tbody>${s.actions.map(a => `<tr><td>${esc(a.trigger)}</td><td>${esc(a.type)}</td><td>${esc(a.status)}</td></tr>`).join('')}</tbody></table></div>
+        <p>Data-layer event names: ${esc(s.events.join(', ') || 'None observed')}</p>
+        <p>Request hosts: ${esc(hosts.join(', ') || 'None observed')}</p>
+        <p>Failed requests: ${s.requests.filter(q => q.outcome === 'failed').length};
+          pending: ${s.requests.filter(q => q.outcome === 'pending').length}.</p>
+        ${s.errors.length ? `<p class="notice warn">${esc(s.errors.join('; '))}</p>` : ''}
+      </details>`;
+    }).join('')}
+    <details><summary>Tag coverage plan (firing unverified)</summary><div class="table-wrap"><table>
+      <thead><tr><th>Tag</th><th>Planned coverage</th><th>Firing triggers</th><th>Exceptions</th></tr></thead>
+      <tbody>${first.coverage.map(t => `<tr><td>${tagMentions(esc(t.tag))}</td><td>${esc(t.status)}</td>
+        <td>${tagMentions(esc(t.triggers.join(', ')))}</td><td>${tagMentions(esc(t.blockers.join(', ')))}</td></tr>`).join('')}</tbody>
+    </table></div></details>`;
 }
 
 function renderLive() {
@@ -727,13 +1240,15 @@ function renderLive() {
     <div class="row" style="margin-top:8px">
       <select id="live-add-stage" style="width:auto"><option value="">Auto-detect state</option>${Object.keys(LIVE_STAGES).map(k => `<option value="${k}">${esc(LIVE_STAGES[k])}</option>`).join('')}</select>
       <button class="btn" data-act="live-add">Add and re-run audit</button>
-    </div>`;
+    </div>
+    ${runnerImportControl()}`;
 }
 
 function addLiveResults(text, stage) {
-  const results = parseLiveResults_(text);
+  const runner = parseRunnerResults_(text);
+  const results = runner || parseLiveResults_(text);
   if (!results.length) throw new Error('No snippet results found. Paste the text the snippet copied to your clipboard.');
-  const merged = mergeLiveResults_(STATE.inputs.live, results, stage);
+  const merged = mergeLiveResults_(runner ? null : STATE.inputs.live, results, stage);
   STATE.inputs.live = merged.data;
   return merged.added;
 }
@@ -752,7 +1267,7 @@ function renderAI() {
       <div class="doc-head"><h2 style="margin:0">${esc(title)}</h2>
         <div class="row"><button class="btn secondary" data-act="copy-doc" data-key="${key}">Copy</button>
         <button class="btn secondary" data-act="dl-doc" data-key="${key}">Download .md</button></div></div>
-      ${renderMarkdown(STATE.ai[key])}</div>` : '';
+      ${auditMarkdown(STATE.ai[key])}</div>` : '';
   $('#view').innerHTML = `
     <h1>AI assistant</h1>
     <p class="lede">Turns the audit into a client report and a fix plan, identifies unknown tags from their code, and answers questions about this audit.</p>
@@ -769,7 +1284,7 @@ function renderAI() {
     ${doc('writeup', 'Client report')}${doc('fixplan', 'GTM fix plan')}
     <h2>Ask about this audit</h2>
     <div class="chat">
-      <div class="chat-log" id="chat-log">${STATE.ai.chat.length ? STATE.ai.chat.map(m => `<div class="msg ${m.role}">${m.role === 'assistant' ? renderMarkdown(m.content) : esc(m.content)}</div>`).join('')
+      <div class="chat-log" id="chat-log">${STATE.ai.chat.length ? STATE.ai.chat.map(m => `<div class="msg ${m.role}">${m.role === 'assistant' ? auditMarkdown(m.content) : tagMentions(esc(m.content))}</div>`).join('')
         : '<p class="hint" style="margin:0">For example: "Why is the Meta pixel high risk?", "Which tags should fire on Consent Initialization?", "Draft an email to the client\'s developer about Clarity."</p>'}
         ${busy === 'chat' ? '<div class="msg assistant thinking">Thinking…</div>' : ''}</div>
       <form class="chat-input" id="chat-form"><label for="chat-q" class="skip">Question</label>
@@ -893,15 +1408,16 @@ function exportPdf() {
   $('#print-report').innerHTML = `
     <div class="page">${reportHeader(r)}<h2>Areas</h2>${areasTable(r)}</div>
     <div class="page"><h2>Prioritised actions</h2>${actionsTable(r)}</div>
-    ${STATE.ai.writeup ? `<div class="page doc">${renderMarkdown(STATE.ai.writeup)}</div>` : ''}
+    ${STATE.ai.writeup ? `<div class="page doc">${auditMarkdown(STATE.ai.writeup)}</div>` : ''}
     <div class="page"><h2>Consent matrix (tags needing attention)</h2>${consentModeNotice(r)}${consentTable(notOk)}</div>
     ${r.live ? `<div class="page"><h2>Live consent test</h2>${liveSection(r.live)}</div>` : ''}
     <div class="page"><h2>ID inventory</h2><div class="table-wrap"><table>
-      <thead><tr><th>Platform</th><th>ID</th><th>Type</th><th>Status</th><th>Used by</th><th>Confirmed</th><th>Notes</th></tr></thead>
+      <thead><tr><th>Platform</th><th>ID</th><th>Type</th><th>Status</th><th>Used by</th><th>Notes</th></tr></thead>
       <tbody>${idRows(r).map(x => `<tr><td>${esc(x.rec.platform)}</td><td><code>${esc(x.rec.id)}</code></td><td>${esc(x.rec.kind)}</td>
-        <td>${x.rec.live ? 'Live' : 'Paused only'}</td><td>${esc(truncate_(x.rec.tags.join(', '), 160))}</td>
-        <td>${STATE.confirmations[x.key] ? '✓' : ''}</td><td>${esc(x.note)}</td></tr>`).join('')}</tbody></table></div></div>
-    ${STATE.ai.fixplan ? `<div class="page doc">${renderMarkdown(STATE.ai.fixplan)}</div>` : ''}`;
+        <td>${x.rec.live ? 'Live' : 'Paused only'}</td><td>${idTagReferences(x.rec)}</td>
+        <td>${esc(x.note)}</td></tr>`).join('')}</tbody></table></div></div>
+    ${STATE.ai.fixplan ? `<div class="page doc">${auditMarkdown(STATE.ai.fixplan)}</div>` : ''}`;
+  $$('details', $('#print-report')).forEach(d => { d.open = true; });
   const title = document.title;
   document.title = 'Tag audit - ' + fileSlug();
   window.print();
@@ -912,7 +1428,7 @@ function saveAudit() {
   const data = {
     app: 'tag-audit-studio', v: 1, savedAt: new Date().toISOString(),
     inputs: STATE.inputs, result: STATE.result, ai: { writeup: STATE.ai.writeup, fixplan: STATE.ai.fixplan, chat: STATE.ai.chat },
-    overrides: STATE.overrides, confirmations: STATE.confirmations
+    overrides: STATE.overrides
   };
   download('tag-audit-' + fileSlug() + '.json', JSON.stringify(data), 'application/json');
 }
@@ -924,7 +1440,6 @@ function openAudit(text) {
   STATE.result = d.result;
   STATE.ai = Object.assign({ writeup: '', fixplan: '', chat: [], busy: '' }, d.ai || {}, { busy: '' });
   STATE.overrides = d.overrides || {};
-  STATE.confirmations = d.confirmations || {};
   updateNav();
   setView('summary');
   toast('Audit opened');
@@ -943,6 +1458,14 @@ document.addEventListener('click', async e => {
   const r = STATE.result;
   try {
     switch (act) {
+      case 'tag-details': toggleTagDetail(el); break;
+      case 'entity-details': toggleEntityDetail(el); break;
+      case 'container-section':
+        if (['tags', 'triggers', 'variables'].includes(el.dataset.section)) {
+          STATE.tagSection = el.dataset.section;
+          renderTags();
+        }
+        break;
       case 'goto': setView(el.dataset.view); break;
       case 'signin': {
         const clientId = ($('#set-client') && $('#set-client').value.trim()) || loadAppSettings().googleClientId;
@@ -989,9 +1512,9 @@ document.addEventListener('click', async e => {
           .concat(consentRows(r, 'All', '').map(t => [t.risk === '—' ? 'Paused' : t.risk, t.label, t.where, t.platform, t.vendor || '', t.purpose,
             (t.firesOn || []).join(' OR '), (t.blockedBy || []).join(' OR '), t.handling, t.recommendation, t.ai && t.ai.what || '']))), 'text/csv'); break;
       case 'csv-ids':
-        download('ids-' + fileSlug() + '.csv', toCsv([['Platform', 'ID', 'Type', 'Status', 'Used by', 'Found in', 'Approved', 'Client confirms', 'Notes']]
+        download('ids-' + fileSlug() + '.csv', toCsv([['Platform', 'ID', 'Type', 'Status', 'Used by', 'Found in', 'Notes']]
           .concat(idRows(r).map(x => [x.rec.platform, x.rec.id, x.rec.kind, x.rec.live ? 'Live' : 'Paused only', x.rec.tags.join('; '),
-            x.rec.where.join('; '), x.approved, STATE.confirmations[x.key] ? 'Yes' : '', x.note]))), 'text/csv'); break;
+            x.rec.where.join('; '), x.note]))), 'text/csv'); break;
       case 'csv-findings':
         download('findings-' + fileSlug() + '.csv', toCsv([['Group', 'Type', 'Item', 'Location', 'Details', 'Notes']]
           .concat([].concat.apply([], r.groups.map(g => g.rows.map(row => [g.plain || g.name].concat(row)))))), 'text/csv'); break;
@@ -1027,6 +1550,22 @@ document.addEventListener('click', async e => {
 });
 
 $('#open-audit').addEventListener('click', () => $('#open-audit-file').click());
+document.addEventListener('change', async e => {
+  if (!e.target.matches('[data-runner-file]')) return;
+  const f = e.target.files[0];
+  if (!f) return;
+  try {
+    if (STATE.running) throw new Error('Wait for the current audit to finish before importing runner results.');
+    if (f.size > 10 * 1024 * 1024) throw new Error('Runner results must be 10 MB or smaller.');
+    const text = await f.text();
+    if (!parseRunnerResults_(text)) throw new Error('Choose a local runner .runner.json results file.');
+    const added = addLiveResults(text);
+    toast('Imported local runner results: ' + added.map(s => LIVE_STAGES[s]).join(', '));
+    if (STATE.view === 'audit') renderAudit();
+    else await runAudit({ stay: true });
+  } catch (err) { toast(err.message, true); }
+  e.target.value = '';
+});
 $('#open-audit-file').addEventListener('change', async e => {
   const f = e.target.files[0];
   if (!f) return;

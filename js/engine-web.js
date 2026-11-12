@@ -14,7 +14,7 @@ function toast_(message) { ENGINE_HOOKS.progress(message); }
 
 function freshAudit_() {
   return {
-    tags: [], issues: [], ga4Events: [], googleTags: [], pageGoogleConfigs: [], externalHosts: {},
+    tags: [], triggers: [], variables: [], issues: [], ga4Events: [], googleTags: [], pageGoogleConfigs: [], externalHosts: {},
     consentMode: { defaultOnPage: false, defaultViaGtm: false, v2: false, redaction: false, passthrough: false },
     ids: {}, userProps: new Set(), currencies: [], paymentDomains: [], extraRows: [],
     pageScanned: false, fullDetail: false, ga4PropertyChecked: false,
@@ -68,7 +68,6 @@ function readClientSettings_() {
     analyticsConsent: !/^n/i.test(s.analyticsConsent),
     namingPattern: safeRegex_(s.namingPattern),
     approvedVendors: list(s.approvedVendors).map(v => v.toLowerCase()),
-    approvedIds: list(s.approvedIds).map(v => v.toUpperCase()),
     ga4Checks: /^y/i.test(s.ga4Checks) ? 'Yes' : /^n/i.test(s.ga4Checks) ? 'No' : 'Auto'
   };
   return settingsCache_;
@@ -205,6 +204,60 @@ function checkGa4PropertyData_(d, mid) {
 
 // ── Live consent test (data stored by app.js) ───────────────────────
 
+function parseRunnerResults_(text) {
+  let data;
+  try { data = JSON.parse(text); } catch (e) { return null; } // Console snippets can include non-JSON wrappers.
+  if (!data || data.tool !== 'tag-audit-local-runner') return null;
+  const invalid = () => { throw new Error('Invalid local runner results. Import an unchanged .runner.json file from the runner.'); };
+  const str = v => typeof v === 'string' && v.length <= 2000;
+  const list = (v, max) => Array.isArray(v) && v.length <= max;
+  if (data.v !== 1 || !data.container || !str(data.container.id) || !str(data.container.name) ||
+      !list(data.results, 3) || !data.results.length || !list(data.sessions, 3) ||
+      !list(data.coverage, 20000)) invalid();
+  const coverage = data.coverage.map(t => {
+    if (!t || !str(t.tag) || !str(t.status) || !list(t.triggers, 1000) || !t.triggers.every(str) ||
+        !list(t.blockers, 1000) || !t.blockers.every(str)) invalid();
+    return { tag: t.tag, status: t.status, triggers: t.triggers, blockers: t.blockers };
+  });
+  const seen = new Set();
+  let origin = null;
+  return data.results.map(r => {
+    if (!r || r.tool !== 'tag-scanner-live-test' || !LIVE_STAGES[r.stage] || seen.has(r.stage) ||
+        !str(r.url) || !str(r.time) || !list(r.gcs, 100) || !r.gcs.every(str) ||
+        !r.vendors || typeof r.vendors !== 'object' || Array.isArray(r.vendors) ||
+        !list(r.otherHosts, 40) || !r.otherHosts.every(str) || !Number.isInteger(r.cookieCount) || r.cookieCount < 0) invalid();
+    let url;
+    try { url = new URL(r.url); } catch (e) { invalid(); }
+    if (!/^https?:$/.test(url.protocol) || (origin && origin !== url.origin)) invalid();
+    origin = url.origin;
+    seen.add(r.stage);
+    Object.keys(r.vendors).forEach(name => {
+      const v = r.vendors[name];
+      if (!str(name) || !v || !Number.isInteger(v.requests) || v.requests < 0 ||
+          !list(v.cookies, 10000) || !v.cookies.every(str) || !str(v.purpose)) invalid();
+    });
+    const sessions = data.sessions.filter(s => s && s.stage === r.stage);
+    if (sessions.length !== 1) invalid();
+    const s = sessions[0];
+    if (!list(s.actions, 1000) || !list(s.events, 10000) || !s.events.every(str) ||
+        !list(s.requests, 100000) || !list(s.errors, 1000) || !s.errors.every(str) || !str(s.consentConfirmation)) invalid();
+    const actions = s.actions.map(a => {
+      if (!a || !str(a.trigger) || !str(a.type) || !str(a.status)) invalid();
+      return { trigger: a.trigger, type: a.type, status: a.status };
+    });
+    const requests = s.requests.map(q => {
+      if (!q || !str(q.host) || !str(q.method) || !str(q.resourceType) ||
+          !['pending', 'response', 'failed'].includes(q.outcome) ||
+          (q.status !== undefined && (!Number.isInteger(q.status) || q.status < 100 || q.status > 599))) invalid();
+      return { host: q.host, method: q.method, resourceType: q.resourceType, outcome: q.outcome, status: q.status };
+    });
+    return Object.assign({}, r, { runner: {
+      container: { id: data.container.id, name: data.container.name }, coverage: coverage,
+      session: { actions: actions, events: s.events, requests: requests, errors: s.errors, consentConfirmation: s.consentConfirmation }
+    } });
+  });
+}
+
 /** Merges snippet results into stored live-test data (same shape the Apps Script used). */
 function mergeLiveResults_(data, results, stageOverride) {
   data = data && data.stages ? data : { stages: {} };
@@ -221,7 +274,8 @@ function mergeLiveResults_(data, results, stageOverride) {
     });
     data.stages[stage] = {
       url: r.url, time: r.time, cmp: r.cmp, consentDefault: r.consentDefault,
-      gcs: r.gcs || [], vendors: vendors, other: (r.otherHosts || []).slice(0, 40), cookieCount: r.cookieCount
+      gcs: r.gcs || [], vendors: vendors, other: (r.otherHosts || []).slice(0, 40), cookieCount: r.cookieCount,
+      runner: r.runner || null
     };
     added.push(stage);
   });

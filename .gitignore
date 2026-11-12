@@ -7,3 +7,6 @@ Thumbs.db
 tag-audit-*.json
 *.audit.json
 exports/
+node_modules/
+runner-results/
+*.runner.json
