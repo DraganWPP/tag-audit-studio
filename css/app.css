@@ -80,6 +80,7 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 .nav-item .count { margin-left: 8px; font-size: .78rem; background: #33476C; color: #fff; border-radius: 10px; padding: 0 7px; }
 .nav-item .count.alert { background: var(--hl); color: var(--hl-ink); font-weight: 600; }
 .nav-bottom { margin-top: auto; }
+.nav-ga4 { margin-top: 14px; }
 .rail-foot { padding: 12px 10px 0; border-top: 1px solid #2A3B5C; margin-top: 12px; }
 .rail-foot .link { color: var(--rail-ink); }
 
@@ -279,6 +280,17 @@ td .sub { color: var(--muted); font-size: .84rem; display: block; margin-top: 2p
 .seg button:last-child { border-right: 0; }
 .seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
 .seg button:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.seg { flex-wrap: wrap; max-width: 100%; }
+
+/* ── GA4 audit ───────────────────────────────────────────────────── */
+.ga4-picker { max-height: 360px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
+.ga4-picker label { display: flex; gap: 10px; align-items: flex-start; padding: 8px 12px; border-bottom: 1px solid var(--line-soft); font-weight: 400; margin: 0; cursor: pointer; }
+.ga4-picker label:last-child { border-bottom: 0; }
+.ga4-picker input { margin-top: 3px; flex: none; }
+.ga4-picker .hint { padding: 8px 12px; }
+.ga4-picker .sub { display: block; }
+table.kv th { width: 34%; font-weight: 600; color: var(--muted); text-align: left; vertical-align: top; }
+#ga4-tab h3 { margin: 22px 0 8px; }
 
 /* ── Tag groups ──────────────────────────────────────────────────── */
 details.group { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
@@ -331,6 +343,7 @@ details.group table { font-size: .87rem; }
   #nav { flex-direction: row; flex-wrap: wrap; gap: 4px; }
   .nav-group { flex-direction: row; flex-wrap: wrap; margin: 0; padding: 0; border: 0; }
   .nav-bottom { margin-top: 0; }
+  .nav-ga4 { margin-top: 0; }
   .rail-foot { display: none; }
   main { padding: 24px 16px 60px; }
   .source, details.rules .rule, .grid2 { grid-template-columns: 1fr; gap: 8px; }

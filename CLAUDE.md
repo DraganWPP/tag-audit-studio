@@ -23,7 +23,10 @@ js/engine.js        pure audit engine, extracted from apps-script/TagScanner.gs 
 js/engine-web.js    browser replacements: AUDIT state (let + resetAudit_), containerCache_, fetchContainer_,
                     readClientSettings_ (from WEB_SETTINGS), GA4 checks from prefetched data, live-test merge,
                     TAG_OVERRIDES (AI/analyst vendor overrides), analyseExportJson_, workspaceRowsFromData_
-js/google.js        Google sign-in, GTM API (lookup → live version → workspaces/status), GA4 Admin API
+js/google.js        Google sign-in (popup + redirect), GTM API (lookup → live version → workspaces/status), GA4 Admin API,
+                    fetchGa4Full (GA4 Admin v1beta/v1alpha + Data API, PII-masked) for the GA4 audit
+js/ga4.js           GA4 audit engine (browser-only, not in Apps Script): buildGa4Result → issues, GA4 areas/score,
+                    event cross-reference with GTM (ga4GtmContext reads result.audit.ga4Events/googleTags), config, data quality
 js/ai.js            providers, AI_SYSTEM prompt, AI_TASKS (writeup, fixplan), aiExplainUnknownTags, aiAuditContext,
                     renderMarkdown (small, safe — escapes HTML first)
 js/app.js           STATE, views (audit, summary, consent, tags, ids, live, findings, ai, settings), runAudit()
@@ -58,7 +61,7 @@ The concept is an "inspection report":
 
 ## Testing
 
-There are no unit tests yet. What was done during development:
+`npm test` runs `tests/runner.test.cjs` (local runner + static app via Playwright) and `tests/ga4.test.cjs` (GA4 audit engine on fixture Admin/Data API JSON, loaded in a `vm` context). What else was done during development:
 - `npm run check` (`node --check` on every script).
 - An end-to-end Playwright run against a mocked network:
   - `gtm.js` served from a fixture compiled container, which has paused tags, trigger groups, rules, OneTrust gating and a hard-coded token
