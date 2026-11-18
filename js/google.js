@@ -37,10 +37,13 @@ const Google = {
           }
           this.token = resp.access_token;
           this.expires = Date.now() + (Number(resp.expires_in || 3600) - 60) * 1000;
+          // If the wait already timed out, still keep the token and tell the app.
+          if (settled) window.dispatchEvent(new Event('google-signed-in'));
           done(resolve, this.token);
         },
         error_callback: err => {
           const type = err && err.type || 'unknown';
+          console.warn('[Google sign-in] error_callback', type, err);
           if (type === 'popup_failed_to_open') {
             return done(reject, new Error('The Google sign-in window was blocked. Allow pop-ups for ' + location.origin + ' and try again.'));
           }
@@ -49,7 +52,8 @@ const Google = {
             // Keep waiting for Google's answer instead of failing straight away.
             waitTimer = setTimeout(() => done(reject, new Error(
               'Google sign-in did not finish. If the window showed "Error 400: origin_mismatch", add ' +
-              location.origin + ' to the OAuth client\'s Authorised JavaScript origins in Google Cloud.')), 120000);
+              location.origin + ' to the OAuth client\'s Authorised JavaScript origins in Google Cloud. ' +
+              'If you approved access and nothing happened, use "Sign in by redirect" instead.')), 120000);
             return;
           }
           done(reject, new Error('Google sign-in failed (' + type + ').'));
@@ -57,6 +61,50 @@ const Google = {
       });
       client.requestAccessToken({ prompt: this.token ? '' : 'consent' });
     });
+  },
+
+  /**
+   * Full-page redirect sign-in (OAuth implicit flow). No popup and no iframe relay,
+   * so it works where corporate Chrome policies or extensions break the popup hand-off.
+   * The page URL (origin + path) must be listed under the OAuth client's
+   * "Authorised redirect URIs" in Google Cloud.
+   */
+  signInRedirect(clientId, returnView) {
+    if (!clientId) throw new Error('Add your Google OAuth client ID in Settings first.');
+    const state = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
+    sessionStorage.setItem('tas.oauth', JSON.stringify({ state, view: returnView || 'audit' }));
+    const params = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: this.redirectUri(),
+      response_type: 'token',
+      scope: GOOGLE_SCOPES,
+      include_granted_scopes: 'true',
+      state
+    });
+    location.assign('https://accounts.google.com/o/oauth2/v2/auth?' + params);
+  },
+
+  redirectUri() { return location.origin + location.pathname; },
+
+  /**
+   * Called once at start-up. Reads the token Google put in the URL fragment after a
+   * redirect sign-in, then removes it from the address bar and history.
+   * Returns null when this load is not a sign-in return, else { view } or { view, error }.
+   */
+  consumeRedirect() {
+    const hash = location.hash.slice(1);
+    if (!/(^|&)(access_token|error)=/.test(hash)) return null;
+    const p = new URLSearchParams(hash);
+    let saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem('tas.oauth') || 'null'); } catch (e) { /* ignore */ }
+    sessionStorage.removeItem('tas.oauth');
+    try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* ignore */ }
+    const view = saved && saved.view || 'audit';
+    if (!saved || p.get('state') !== saved.state) return { view, error: 'Google sign-in could not be verified (state mismatch). Try again.' };
+    if (p.get('error')) return { view, error: 'Google sign-in failed: ' + p.get('error') };
+    this.token = p.get('access_token');
+    this.expires = Date.now() + (Number(p.get('expires_in') || 3600) - 60) * 1000;
+    return { view };
   },
 
   signOut() {
@@ -223,38 +271,129 @@ async function fetchGtmContainerDetail(publicId, progress, target) {
 
 // ── GA4 Admin API ───────────────────────────────────────────────────
 
-const GA4_STREAM_CACHE_KEY = 'tas.ga4Streams';
+const GA4_STREAM_CACHE_KEY = 'tas.ga4Streams';   // measurement ID → property it belongs to
+const GA4_MISS_KEY = 'tas.ga4Misses';             // measurement ID → time a full search did not find it
+const GA4_MISS_TTL = 6 * 3600 * 1000;
+const GA4_CONCURRENCY = 5;
+const GA4_HINT_STOP = new Set(['www', 'com', 'net', 'org', 'http', 'https', 'the', 'and', 'ltd', 'inc', 'web', 'app',
+                               'site', 'ga4', 'test', 'staging', 'prod', 'property', 'account']);
 
-async function findGa4Property(mid, progress) {
-  let cache = {};
-  try { cache = JSON.parse(localStorage.getItem(GA4_STREAM_CACHE_KEY) || '{}'); } catch (e) { /* ignore */ }
-  if (cache[mid]) return cache[mid];
-  const summaries = await Google.listAll(GA4_API + 'v1beta/accountSummaries?pageSize=200', 'accountSummaries');
-  let found = null;
-  for (const acc of summaries) {
-    for (const ps of (acc.propertySummaries || [])) {
-      progress && progress('Looking for ' + mid + ' in "' + ps.displayName + '"…');
-      let streams = [];
-      try { streams = await Google.listAll(GA4_API + 'v1beta/' + ps.property + '/dataStreams?pageSize=200', 'dataStreams'); }
-      catch (e) { continue; }
-      streams.forEach(ds => {
-        const id = ds.webStreamData && ds.webStreamData.measurementId;
-        if (!id) return;
-        cache[id] = { property: ps.property, displayName: ps.displayName, account: acc.displayName, streams: streams.length };
-        if (id === mid) found = cache[id];
-      });
-      if (found) break;
-    }
-    if (found) break;
+function readJsonStore_(key) {
+  try { return JSON.parse(localStorage.getItem(key) || '{}') || {}; } catch (e) { return {}; }
+}
+function writeJsonStore_(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* ignore */ }
+}
+
+/** Words from the client name and site domain, used to search likely properties first. */
+function ga4HintWords_(hints) {
+  const words = new Set();
+  const add = s => String(s || '').toLowerCase().split(/[^a-z0-9]+/)
+    .forEach(w => { if (w.length >= 3 && !GA4_HINT_STOP.has(w)) words.add(w); });
+  add(hints.client);
+  if (hints.site) {
+    let host = String(hints.site);
+    try { host = new URL(/^https?:/i.test(host) ? host : 'https://' + host).hostname; } catch (e) { /* use as typed */ }
+    add(host.split('.').slice(0, -1).join(' '));   // drop the TLD
   }
-  try { localStorage.setItem(GA4_STREAM_CACHE_KEY, JSON.stringify(cache)); } catch (e) { /* ignore */ }
-  return found;
+  return words;
+}
+
+function ga4HintScore_(name, words) {
+  const text = String(name || '').toLowerCase();
+  const tokens = text.split(/[^a-z0-9]+/).filter(t => t.length >= 4);
+  let score = 0;
+  words.forEach(w => { if (text.indexOf(w) >= 0 || tokens.some(t => w.indexOf(t) >= 0)) score++; });
+  return score;
+}
+
+/** Errors worth a second try: rate limits, Google 5xx and network failures. */
+function isTransientGoogleError_(e) {
+  return !e.status || e.status === 429 || e.status >= 500;
+}
+
+/**
+ * Finds the GA4 property behind a measurement ID. The Admin API has no lookup by
+ * measurement ID, so this lists the account's properties and reads their data streams:
+ * likely properties (matching the client name / site) first, several at a time.
+ * Returns { property, skipped } — skipped lists properties that could not be read.
+ */
+async function findGa4Property(mid, progress, hints, force) {
+  const cache = readJsonStore_(GA4_STREAM_CACHE_KEY);
+  if (cache[mid]) return { property: cache[mid], skipped: [] };
+  const misses = readJsonStore_(GA4_MISS_KEY);
+  if (!force && misses[mid] && Date.now() - misses[mid] < GA4_MISS_TTL) {
+    progress && progress(mid + ' was not found in your GA4 properties in the last few hours. Re-run the audit to search again.');
+    return { property: null, skipped: [] };
+  }
+
+  const summaries = await Google.listAll(GA4_API + 'v1beta/accountSummaries?pageSize=200', 'accountSummaries');
+  const known = new Set(Object.keys(cache).map(k => cache[k].property));
+  const words = ga4HintWords_(hints || {});
+  const props = [];
+  summaries.forEach(acc => (acc.propertySummaries || []).forEach(ps => {
+    // Properties whose streams are already cached go last: the ID was not among them.
+    const score = known.has(ps.property) ? -1 : ga4HintScore_(ps.displayName + ' ' + acc.displayName, words);
+    props.push({ ps: ps, acc: acc, score: score });
+  }));
+  props.sort((a, b) => b.score - a.score);   // stable: keeps Google's order within a score
+
+  let found = null, checked = 0;
+  const failed = [];
+  const scan = async item => {
+    const streams = await Google.listAll(GA4_API + 'v1beta/' + item.ps.property + '/dataStreams?pageSize=200', 'dataStreams');
+    streams.forEach(ds => {
+      const id = ds.webStreamData && ds.webStreamData.measurementId;
+      if (!id) return;
+      cache[id] = { property: item.ps.property, displayName: item.ps.displayName, account: item.acc.displayName, streams: streams.length };
+      if (id === mid) found = cache[id];
+    });
+  };
+
+  progress && progress('Looking for ' + mid + ' in ' + props.length + ' GA4 properties' +
+    (props[0] && props[0].score > 0 ? ', likely matches first' : '') + '…');
+  const queue = props.slice();
+  const worker = async () => {
+    while (!found && queue.length) {
+      const item = queue.shift();
+      try { await scan(item); }
+      catch (e) {
+        if (e.status === 401) throw e;                     // signed out: stop everything
+        if (isTransientGoogleError_(e)) failed.push(item); // 403/404: no access to this one, move on
+      }
+      checked++;
+      if (!found && progress && checked % 10 === 0) progress('Checked ' + checked + ' of ' + props.length + ' GA4 properties…');
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(GA4_CONCURRENCY, props.length) }, worker));
+
+  // Second chance, one at a time, for properties Google failed to answer for
+  const skipped = [];
+  for (const item of failed) {
+    if (found) break;
+    try { await scan(item); }
+    catch (e) {
+      if (e.status === 401) throw e;
+      skipped.push(item.ps.displayName || item.ps.property);
+    }
+  }
+
+  writeJsonStore_(GA4_STREAM_CACHE_KEY, cache);
+  if (found) {
+    delete misses[mid];
+    progress && progress('Found ' + mid + ' in "' + found.displayName + '"');
+  } else if (!skipped.length) {
+    misses[mid] = Date.now();
+  }
+  writeJsonStore_(GA4_MISS_KEY, misses);
+  return { property: found, skipped: skipped };
 }
 
 /** Everything the engine's GA4 checks need, for one measurement ID. */
-async function fetchGa4PropertyData(mid, progress) {
-  const prop = await findGa4Property(mid, progress);
-  if (!prop) return { noAccess: true };
+async function fetchGa4PropertyData(mid, progress, hints, force) {
+  const lookup = await findGa4Property(mid, progress, hints, force);
+  const prop = lookup.property;
+  if (!prop) return { noAccess: true, skipped: lookup.skipped };
   const p = prop.property;
   const soft = async (fn, fallback) => { try { return await fn(); } catch (e) { console.debug('GA4', e.message); return fallback; } };
   progress && progress('Checking GA4 property "' + prop.displayName + '"…');

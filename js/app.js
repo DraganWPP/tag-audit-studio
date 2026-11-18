@@ -40,7 +40,7 @@ const STATE = {
   result: null,
   ai: { writeup: '', fixplan: '', chat: [], busy: '' },
   overrides: {},
-  caches: { containers: {}, api: {}, ga4: {} },
+  caches: { containers: {}, api: {}, ga4: {}, gtag: {} },
   running: false,
   consentFilter: 'All',
   tagSection: 'tags',
@@ -155,6 +155,18 @@ async function fetchPublicContainer(id) {
     STATE.caches.containers[id] = { code: 0, js: null, error: e.message };
   }
   return STATE.caches.containers[id];
+}
+
+/** The published Google tag for a GA4 measurement ID. It carries the data stream's settings. */
+async function fetchPublicGtag(mid) {
+  if (STATE.caches.gtag[mid]) return STATE.caches.gtag[mid];
+  try {
+    const res = await fetch('https://www.googletagmanager.com/gtag/js?id=' + encodeURIComponent(mid));
+    STATE.caches.gtag[mid] = { code: res.status, js: res.ok ? await res.text() : null };
+  } catch (e) {
+    STATE.caches.gtag[mid] = { code: 0, js: null, error: e.message };
+  }
+  return STATE.caches.gtag[mid];
 }
 
 async function runAudit(opts) {
@@ -277,14 +289,28 @@ async function runAudit(opts) {
     });
     if (hasLive) { AUDIT.liveData = i.live; sources.push('Live consent test'); }
 
-    // GA4 property checks need the IDs found above
+    // GA4 checks need the measurement IDs found above
+    const liveMids = Array.from(new Set(Object.keys(AUDIT.ids).map(k => AUDIT.ids[k])
+      .filter(r => r.platform === 'GA4' && r.live && /^G-[A-Z0-9]+$/.test(r.id)).map(r => r.id)));
+    if ((i.rules.ga4Checks || 'Auto') !== 'No' && liveMids.length) {
+      // Data stream settings from the public Google tag (no sign-in needed)
+      AUDIT.gtagStreams = {};
+      for (const mid of liveMids) {
+        log('Reading the published Google tag for ' + mid + '…');
+        const g = await fetchPublicGtag(mid);
+        if (g.js) AUDIT.gtagStreams[mid] = g.js;
+        else log(mid + ': Google tag could not be downloaded (' + (g.code ? 'HTTP ' + g.code : g.error || 'network error') + ')', true);
+      }
+    }
     if (i.ga4 && (i.rules.ga4Checks || 'Auto') !== 'No') {
-      const mids = Object.keys(AUDIT.ids).map(k => AUDIT.ids[k]).filter(r => r.platform === 'GA4' && r.live).map(r => r.id);
+      const mids = liveMids;
       if (mids.length && Google.isSignedIn()) {
         AUDIT.ga4Data = {};
         for (const mid of Array.from(new Set(mids))) {
           try {
-            if (!STATE.caches.ga4[mid] || opts.refresh) STATE.caches.ga4[mid] = await fetchGa4PropertyData(mid, log);
+            if (!STATE.caches.ga4[mid] || opts.refresh) {
+              STATE.caches.ga4[mid] = await fetchGa4PropertyData(mid, log, { client: i.client, site: i.site }, !!opts.refresh);
+            }
             AUDIT.ga4Data[mid] = STATE.caches.ga4[mid];
           } catch (e) {
             AUDIT.ga4Data[mid] = { error: e.message };
@@ -394,7 +420,8 @@ function renderAudit() {
             ${Google.isSignedIn()
               ? '<span class="signed">Signed in to Google</span> <button class="link" data-act="signout">Sign out</button>'
               : '<button class="btn secondary" data-act="signin">Sign in with Google</button>' +
-                (s.googleClientId ? '' : ' <span class="hint">Add a Google OAuth client ID in <button class="link" data-act="goto" data-view="settings">Settings</button> first.</span>')}
+                (s.googleClientId ? ' <button class="link" data-act="signin-redirect">Popup not working? Sign in by redirect</button>'
+                  : ' <span class="hint">Add a Google OAuth client ID in <button class="link" data-act="goto" data-view="settings">Settings</button> first.</span>')}
           </div>
           <label for="in-api">GTM container IDs to read through the API</label>
           <input type="text" id="in-api" value="${esc(i.apiIds)}" placeholder="GTM-XXXXXXX">
@@ -1379,7 +1406,7 @@ function renderSettings() {
       <input type="text" id="set-client" value="${esc(s.googleClientId || '')}" placeholder="1234567890-abc.apps.googleusercontent.com">
       <p class="hint">Create a "Web application" OAuth client in Google Cloud with this site's address as an authorised JavaScript origin, and enable the Tag Manager API and Google Analytics Admin API. See the README.</p>
       <div class="actions"><button class="btn" data-act="save-google">Save</button>
-        ${Google.isSignedIn() ? '<button class="btn secondary" data-act="signout">Sign out of Google</button>' : '<button class="btn secondary" data-act="signin">Sign in with Google</button>'}</div>
+        ${Google.isSignedIn() ? '<button class="btn secondary" data-act="signout">Sign out of Google</button>' : '<button class="btn secondary" data-act="signin">Sign in with Google</button> <button class="link" data-act="signin-redirect">Popup not working? Sign in by redirect</button>'}</div>
     </section>
 
     <section class="form-block">
@@ -1489,6 +1516,13 @@ document.addEventListener('click', async e => {
         finally { el.disabled = false; el.textContent = 'Sign in with Google'; }
         toast('Signed in to Google'); VIEWS[STATE.view](); break;
       }
+      case 'signin-redirect': {
+        const clientId = ($('#set-client') && $('#set-client').value.trim()) || loadAppSettings().googleClientId;
+        if ($('#set-client') && clientId) saveAppSettings({ googleClientId: clientId });
+        saveDraft();
+        Google.signInRedirect(clientId, STATE.view);
+        break;
+      }
       case 'signout': Google.signOut(); toast('Signed out of Google'); VIEWS[STATE.view](); break;
       case 'load-workspaces': {
         const ids = parseIds(STATE.inputs.apiIds);
@@ -1555,8 +1589,8 @@ document.addEventListener('click', async e => {
       }
       case 'save-google': saveAppSettings({ googleClientId: $('#set-client').value.trim() }); toast('Google settings saved'); break;
       case 'clear-data':
-        ['tas.settings', 'tas.draft', 'tas.gtmPaths', 'tas.ga4Streams'].forEach(k => { try { localStorage.removeItem(k); } catch (x) { /* ignore */ } });
-        STATE.caches = { containers: {}, api: {}, ga4: {} };
+        ['tas.settings', 'tas.draft', 'tas.gtmPaths', 'tas.ga4Streams', 'tas.ga4Misses'].forEach(k => { try { localStorage.removeItem(k); } catch (x) { /* ignore */ } });
+        STATE.caches = { containers: {}, api: {}, ga4: {}, gtag: {} };
         toast('Saved settings and caches cleared'); renderSettings(); break;
     }
   } catch (err) {
@@ -1592,4 +1626,7 @@ $('#open-audit-file').addEventListener('change', async e => {
 // ── Start ───────────────────────────────────────────────────────────
 applyTheme();
 updateNav();
-setView((location.hash || '#audit').slice(1));
+window.addEventListener('google-signed-in', () => { toast('Signed in to Google'); VIEWS[STATE.view](); });
+const oauthReturn = Google.consumeRedirect();
+setView(oauthReturn ? oauthReturn.view : (location.hash || '#audit').slice(1));
+if (oauthReturn) toast(oauthReturn.error || 'Signed in to Google', !!oauthReturn.error);
