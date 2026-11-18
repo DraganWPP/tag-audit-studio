@@ -954,7 +954,9 @@ function renderSummary() {
   const r = STATE.result;
   $('#view').innerHTML = reportHeader(r) + `
     <div class="actions">
-      <button class="btn" data-act="pdf">Export PDF report</button>
+      <button class="btn" data-act="pdf">Client PDF report</button>
+      <button class="btn secondary" data-act="pptx">Client PowerPoint</button>
+      <button class="btn secondary" data-act="pdf-technical">Technical PDF report</button>
       <button class="btn secondary" data-act="csv-actions">Download actions (CSV)</button>
       <button class="btn secondary" data-act="save">Save audit</button>
       <button class="btn secondary" data-act="rerun">Re-run audit</button>
@@ -1403,8 +1405,20 @@ function applyTheme() {
 // ══════════════════════════════════════════════════════════════════
 
 function exportPdf() {
+  const model = clientReportModel(STATE.result);
+  const target = $('#print-report');
+  target.className = 'client-report';
+  target.innerHTML = clientReportHtml(model);
+  const title = document.title;
+  document.title = 'Client report - ' + fileSlug();
+  try { window.print(); }
+  finally { document.title = title; }
+}
+
+function exportTechnicalPdf() {
   const r = STATE.result;
   const notOk = consentRows(r, 'All', '').filter(t => t.risk !== 'OK');
+  $('#print-report').className = '';
   $('#print-report').innerHTML = `
     <div class="page">${reportHeader(r)}<h2>Areas</h2>${areasTable(r)}</div>
     <div class="page"><h2>Prioritised actions</h2>${actionsTable(r)}</div>
@@ -1503,6 +1517,8 @@ document.addEventListener('click', async e => {
       }
       case 'rerun': await runAudit({ refresh: true }); break;
       case 'pdf': exportPdf(); break;
+      case 'pdf-technical': exportTechnicalPdf(); break;
+      case 'pptx': await exportClientPowerPoint(el); break;
       case 'save': saveAudit(); break;
       case 'csv-actions':
         download('actions-' + fileSlug() + '.csv', toCsv([['#', 'Severity', 'Area', 'Finding', 'Action', 'Where', 'Items']]

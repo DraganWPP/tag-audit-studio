@@ -64,7 +64,7 @@ before(async () => {
       res.end('ok');
     } else {
       const relative = route === '/' ? 'index.html' : route.slice(1);
-      if (!/^(index\.html|js\/[a-z-]+\.js|css\/app\.css)$/.test(relative)) {
+      if (!/^(index\.html|js\/[a-z-]+\.js|css\/(?:app|report)\.css)$/.test(relative)) {
         res.writeHead(404); res.end(); return;
       }
       fs.readFile(path.join(root, ...relative.split('/'))).then(data => {
@@ -582,6 +582,221 @@ test('ID inventory removes approvals and confirmations from UI, exports and save
   }
 });
 
+function clientReportFixture() {
+  return {
+    meta: { client: 'Example <Brand>', site: 'https://example.test', date: '2026-11-12T12:00:00Z', sources: ['Export'], settings: {} },
+    score: { score: 68, grade: 'C' }, rows: [], groups: [], areas: [],
+    issues: [
+      { area: 'Consent', severity: 'High', finding: '2 tag(s) may fire without consent',
+        action: 'TECHNICAL_PAYLOAD_DO_NOT_EXPORT', where: 'GTM', items: ['private tag name', 'second private tag'] },
+      { area: 'GA4 Setup', severity: 'Medium', finding: '2 Google tags in GTM for G-TEST123',
+        action: 'TECHNICAL_PAYLOAD_DO_NOT_EXPORT', items: [] },
+      { area: 'Accounts & IDs', severity: 'Medium', finding: '2 different Meta IDs are live', action: 'Confirm destinations' },
+      { area: 'Hygiene', severity: 'Low', finding: '1 unused trigger(s)', action: 'Delete triggers' }
+    ],
+    audit: { fullDetail: true, pageScanned: true, ga4PropertyChecked: false, tags: [], ids: {},
+      consentMode: { defaultOnPage: true, v2: true } }, live: null
+  };
+}
+
+test('client report content preserves priorities, separates live evidence and avoids exposing technical payloads', async () => {
+  const context = await browser.newContext();
+  try {
+    await context.route('**/*', route => new URL(route.request().url()).origin === base ? route.continue() : route.abort());
+    const page = await context.newPage();
+    await page.goto(base);
+    assert.deepEqual(await page.evaluate(() => [0, 59, 60, 89, 90, 100].map(clientScoreTraffic)),
+      ['High', 'High', 'Medium', 'Medium', 'Low', 'Low']);
+    const fixture = clientReportFixture();
+    fixture.live = { data: { stages: { before: {} } }, verdicts: [
+      { vendor: 'Example tool', verdict: 'High' }, { vendor: 'Necessary tool', verdict: 'OK' }
+    ] };
+    const model = await page.evaluate(result => clientReportModel(result), fixture);
+    assert.deepEqual(model.counts, { High: 1, Medium: 2, Low: 1 });
+    assert.equal(model.findingCount, 4);
+    assert.equal(model.liveCount, 1);
+    assert.equal(model.actions.length, 5);
+    assert.equal(model.score, 68);
+    assert.equal(model.grade, 'C');
+    assert.equal(model.actions.filter(action => action.evidence === 'Live observation').length, 1);
+    assert.match(model.coverage.join(' '), /before choice/);
+    assert.doesNotMatch(model.coverage.join(' '), /Reject|Accept/);
+    assert.match(model.coverage.join(' '), /account review incomplete/);
+    assert.doesNotMatch(JSON.stringify(model), /TECHNICAL_PAYLOAD|G-TEST123|private tag name/);
+    const consent = model.actions.find(action => action.id === 'finding-1');
+    assert.match(consent.why, /not proof/);
+    assert.match(consent.recommendation, /Review/);
+    assert.equal(consent.affected, 2);
+    const empty = clientReportFixture();
+    empty.issues = [];
+    empty.audit.fullDetail = false;
+    empty.audit.pageScanned = false;
+    empty.score = { score: 100, grade: 'A' };
+    const missing = await page.evaluate(result => clientReportModel(result), empty);
+    assert.equal(missing.score, null);
+    assert.equal(missing.health, 'Insufficient evidence');
+    assert.equal(missing.areas.every(area => area.status === 'Not checked'), true);
+    assert.match(missing.noActions, /No audit evidence/);
+    empty.audit.fullDetail = true;
+    const clean = await page.evaluate(result => clientReportModel(result), empty);
+    assert.equal(clean.score, 100);
+    assert.match(clean.noActions, /available checks/);
+    const unknown = clientReportFixture();
+    unknown.issues[0].severity = 'unexpected';
+    await assert.rejects(() => page.evaluate(result => clientReportModel(result), unknown), /unsupported priority/);
+  } finally { await context.close(); }
+});
+
+test('client PDF follows the dashboard design, includes every action and retains a separate technical export', async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  try {
+    await context.route('**/*', route => new URL(route.request().url()).origin === base ? route.continue() : route.abort());
+    const page = await context.newPage();
+    await page.goto(base);
+    await page.evaluate(result => { STATE.result = result; setView('summary'); window.print = () => {}; }, clientReportFixture());
+    assert.equal(await page.locator('[data-act="pdf"]').innerText(), 'Client PDF report');
+    await page.locator('[data-act="pdf"]').click();
+    const report = page.locator('#print-report');
+    assert.equal(await report.getAttribute('class'), 'client-report');
+    assert.equal(await report.locator('.client-report-page').count(), 3);
+    assert.equal(await report.locator('.cr-action-detail').count(), 4);
+    assert.equal(await report.locator('.cr-score-Medium .cr-progress').evaluate(node => getComputedStyle(node).stroke), 'rgb(255, 200, 87)');
+    assert.equal(await report.locator('.cr-badge.cr-High').first().evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(252, 232, 230)');
+    assert.equal(await report.locator('.cr-badge.cr-Medium').first().evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(255, 242, 204)');
+    assert.equal(await report.locator('.cr-badge.cr-Low').first().evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(226, 243, 230)');
+    assert.equal(await report.locator('.cr-stack .cr-High').evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(198, 40, 40)');
+    assert.equal(await report.locator('.cr-stack .cr-Medium').evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(217, 140, 0)');
+    assert.equal(await report.locator('.cr-stack .cr-Low').evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(46, 125, 50)');
+    assert.deepEqual(await report.locator('.cr-action-detail').evaluateAll(nodes => nodes.map(n => n.dataset.finding)),
+      ['finding-1', 'finding-2', 'finding-3', 'finding-4']);
+    assert.equal(await report.locator('pre, code, .tag-toggle').count(), 0);
+    assert.doesNotMatch(await report.innerText(), /TECHNICAL_PAYLOAD|private tag name/);
+    assert.match(await report.innerText(), /Example <Brand>/);
+    await page.emulateMedia({ media: 'print' });
+    assert.equal(await report.isVisible(), true);
+    assert.equal(await report.locator('.cr-health').first().evaluate(node => getComputedStyle(node).backgroundColor), 'rgb(22, 35, 58)');
+    const sizes = await report.locator('.client-report-page').evaluateAll(nodes =>
+      nodes.map(n => ({ width: n.getBoundingClientRect().width, height: n.getBoundingClientRect().height,
+        overflow: n.scrollWidth > n.clientWidth })));
+    assert.ok(sizes.every(size => size.height <= 1124 && size.width < 795 && !size.overflow), JSON.stringify(sizes));
+    const pdf = await page.pdf({ preferCSSPageSize: true, printBackground: true });
+    assert.equal((pdf.toString('latin1').match(/\/Type \/Page\b/g) || []).length, 3);
+    await page.emulateMedia({ colorScheme: 'dark', media: 'screen' });
+    await page.locator('[data-act="pdf-technical"]').click();
+    assert.equal(await report.getAttribute('class'), '');
+    assert.equal(await report.locator('.client-report-page').count(), 0);
+    assert.match(await report.innerHTML(), /TECHNICAL_PAYLOAD_DO_NOT_EXPORT/);
+    await page.locator('[data-act="pdf"]').click();
+    assert.equal(await report.getAttribute('class'), 'client-report');
+    const many = clientReportFixture();
+    many.issues = Array.from({ length: 17 }, (_, i) => ({ ...many.issues[i % 4] }));
+    await page.evaluate(result => { STATE.result = result; exportPdf(); }, many);
+    assert.equal(await report.locator('.cr-action-detail').count(), 17);
+    assert.equal(await report.locator('.client-report-page').count(), 7);
+    const empty = clientReportFixture();
+    empty.issues = [];
+    empty.audit = { tags: [], ids: {}, consentMode: {} };
+    await page.evaluate(result => { STATE.result = result; exportPdf(); }, empty);
+    assert.match(await report.innerText(), /No score available/);
+    assert.equal(await report.locator('.client-report-page').count(), 1);
+    await page.emulateMedia({ media: 'print' });
+    const emptyPdf = await page.pdf({ preferCSSPageSize: true, printBackground: true });
+    assert.equal((emptyPdf.toString('latin1').match(/\/Type \/Page\b/g) || []).length, 1);
+  } finally { await context.close(); }
+});
+
+test('PowerPoint export retries failed lazy loading and produces editable native slides and charts', async () => {
+  const context = await browser.newContext();
+  try {
+    const bundleUrl = 'https://cdn.jsdelivr.net/npm/pptxgenjs@4.0.1/dist/pptxgen.bundle.js';
+    let attempts = 0;
+    await context.route('**/*', route => {
+      if (route.request().url() === bundleUrl) attempts++;
+      return new URL(route.request().url()).origin === base ? route.continue() : route.abort();
+    });
+    const page = await context.newPage();
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(base);
+    await page.evaluate(result => { STATE.result = result; setView('summary'); }, clientReportFixture());
+    assert.equal(attempts, 0, 'Presentation dependency is not loaded until requested');
+    const button = page.locator('[data-act="pptx"]');
+    await button.click();
+    await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('library could not load'));
+    assert.equal(await button.isEnabled(), true);
+    assert.equal(await button.innerText(), 'Client PowerPoint');
+    const bundle = await fs.readFile(path.join(root, 'node_modules', 'pptxgenjs', 'dist', 'pptxgen.bundle.js'));
+    await context.route(bundleUrl, route => route.fulfill({
+      body: bundle, contentType: 'application/javascript', headers: { 'access-control-allow-origin': '*' }
+    }));
+    const pendingDownload = page.waitForEvent('download');
+    await button.click();
+    const downloaded = await pendingDownload;
+    assert.match(downloaded.suggestedFilename(), /\.pptx$/);
+    const buffer = await fs.readFile(await downloaded.path());
+    assert.equal(buffer.subarray(0, 2).toString(), 'PK');
+    await page.waitForFunction(() => !document.querySelector('[data-act="pptx"]').disabled);
+    const structure = await page.evaluate(async () => {
+      const model = clientReportModel(STATE.result);
+      const deck = clientReportPresentation(model, window.PptxGenJS);
+      const zip = await window.JSZip.loadAsync(await deck.write({ outputType: 'base64' }), { base64: true });
+      const slides = Object.keys(zip.files).filter(name => /^ppt\/slides\/slide\d+\.xml$/.test(name));
+      const charts = Object.keys(zip.files).filter(name => /^ppt\/charts\/chart\d+\.xml$/.test(name));
+      const xml = (await Promise.all(slides.map(name => zip.file(name).async('string')))).join('\n');
+      const chart = await zip.file(charts[0]).async('string');
+      const layout = await zip.file('ppt/presentation.xml').async('string');
+      return { slides: slides.length, charts: charts.length, xml, chart, layout,
+        media: Object.keys(zip.files).filter(name => /^ppt\/media\/.+/.test(name)) };
+    });
+    assert.equal(structure.slides, 4);
+    assert.equal(structure.charts, 1);
+    assert.match(structure.chart, /doughnutChart/);
+    assert.match(structure.chart, /<c:v>68<\/c:v>/);
+    assert.match(structure.layout, /cx="12192000" cy="6858000"/);
+    assert.match(structure.xml, /<p:sp>/);
+    assert.doesNotMatch(structure.xml, /<p:pic>|TECHNICAL_PAYLOAD|private tag name/);
+    assert.deepEqual(structure.media, []);
+    assert.match(structure.xml, /Example &lt;Brand&gt;/);
+    assert.match(structure.xml, /Review tracking consent controls/);
+    assert.match(structure.xml, /Avoid duplicate measurement/);
+    assert.match(structure.xml, /Clean up unreferenced configuration/);
+    assert.match(structure.xml, /Score reflects configuration checks/);
+    assert.match(structure.xml, /<a:normAutofit/);
+    assert.match(structure.xml, /val="FCE8E6"/);
+    assert.match(structure.xml, /val="FFF2CC"/);
+    assert.match(structure.xml, /val="E2F3E6"/);
+    assert.match(structure.chart, /<a:srgbClr val="FFC857"/);
+    const edgeCases = await page.evaluate(async () => {
+      const cases = [];
+      for (const score of [null, 0, 100]) {
+        const model = clientReportModel(STATE.result);
+        model.score = score;
+        model.actions = [];
+        model.first = model.noActions = 'No recommendations from the available checks.';
+        const deck = clientReportPresentation(model, window.PptxGenJS);
+        const zip = await window.JSZip.loadAsync(await deck.write({ outputType: 'base64' }), { base64: true });
+        cases.push({
+          score,
+          slides: Object.keys(zip.files).filter(name => /^ppt\/slides\/slide\d+\.xml$/.test(name)).length,
+          charts: Object.keys(zip.files).filter(name => /^ppt\/charts\/chart\d+\.xml$/.test(name)).length
+        });
+      }
+      return cases;
+    });
+    assert.deepEqual(edgeCases, [{ score: null, slides: 2, charts: 0 }, { score: 0, slides: 2, charts: 1 }, { score: 100, slides: 2, charts: 1 }]);
+    await page.evaluate(() => {
+      const Pptx = window.PptxGenJS;
+      window.PptxGenJS = class extends Pptx {
+        writeFile() { throw new Error('Synthetic download failure'); }
+      };
+    });
+    await button.click();
+    await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('Synthetic download failure'));
+    assert.equal(await button.isEnabled(), true);
+    assert.deepEqual(errors, []);
+  } finally { await context.close(); }
+});
+
 test('container parsing includes built-in triggers and honest coverage', () => {
   const c = readContainer(JSON.stringify(fixture));
   assert.equal(c.triggers.length, 2);
@@ -726,7 +941,7 @@ test('static app imports runner evidence, renders it, prints it and reopens save
       app: 'tag-audit-studio', result: STATE.result, inputs: STATE.inputs
     }));
     await page.evaluate(text => openAudit(text), saved);
-    await page.evaluate(() => { window.print = () => {}; exportPdf(); });
+    await page.evaluate(() => { window.print = () => {}; exportTechnicalPdf(); });
     assert.match(await page.locator('#print-report').innerHTML(), /Local runner evidence/);
     assert.equal(await page.locator('#print-report details').evaluateAll(ds => ds.every(d => d.open)), true);
     await page.emulateMedia({ media: 'print' });

@@ -15,7 +15,44 @@ It's a static web app (HTML, CSS and JavaScript only, with no build step and no 
 | **IDs** | Every pixel, account and measurement ID, with flags for leftover or duplicate IDs |
 | **Live test** | What fired before a choice, after Deny and after Accept, from a console snippet |
 | **AI assistant** | Client report · identify unknown tags from their code (updates the consent matrix) · GTM fix plan · chat about the audit |
-| **Exports** | PDF report (print), CSV per table, save and reopen audits (`.json`) |
+| **Exports** | Client dashboard PDF, editable PowerPoint, technical PDF, CSV per table, save and reopen audits (`.json`) |
+
+### Client reports
+
+From **Summary**, choose:
+
+- **Client PDF report**: a portrait A4 dashboard with the existing score and
+  grade, priority totals, a five-area overview and the next two recommendations.
+  Following pages include every recommendation, why it matters, suggested teams
+  and how to confirm the fix. In the print dialog choose **Save as PDF**, use
+  the document's page size, turn off browser headers/footers and enable
+  background graphics.
+- **Client PowerPoint**: a widescreen `.pptx` with the same visual style, an
+  overview slide, two recommendations per action-plan slide, and a coverage
+  slide. Text, shapes and the score's native PowerPoint doughnut chart are
+  editable, rather than screenshots.
+- **Technical PDF report**: the original detailed report, including findings,
+  consent evidence and ID inventory, for the implementation team.
+
+Client reports use shared, deterministic plain-language summaries, not AI
+calls. They omit raw code, account IDs, internal tag names and AI conversations.
+Unknown finding types receive an area-level recommendation; the technical
+report retains the original finding and implementation detail. Live consent
+observations are clearly separate from configuration findings and do not alter
+the audit score. Missing evidence is labelled; no score is presented when no
+configuration or page evidence is available. Suggested teams are recommendations,
+not assigned owners or delivery commitments. A score is not a legal compliance
+rating or a guarantee of data accuracy. Priority colors follow a traffic-light
+key: red for high, amber for medium and green for low; the score uses red below
+60, amber from 60–89 and green from 90.
+
+PowerPoint export loads **PptxGenJS 4.0.1** from jsDelivr only on demand, pinned
+with a subresource-integrity hash. First use requires internet/CDN access;
+failure is shown and can be retried. Audit data stays in the browser: no backend
+or provider upload is used. The npm package is a **development-only** dependency
+for tests; `node_modules` is not deployed. Its Node-only image parser is
+overridden to a patched version; no image files are processed by these exports.
+Reports can still contain client-sensitive conclusions: review them before sharing.
 
 ### Expandable tag details
 
