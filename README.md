@@ -129,10 +129,16 @@ The key is stored in the browser's local storage and sent only to that provider.
 1. In [Google Cloud Console](https://console.cloud.google.com), create or choose a project.
 2. Under **APIs & Services → Library**, enable the **Tag Manager API** and the **Google Analytics Admin API**.
 3. Under **APIs & Services → OAuth consent screen**, choose **Internal** (only people in your Google Workspace can sign in), then add the scopes `…/auth/tagmanager.readonly` and `…/auth/analytics.readonly`.
-4. Under **APIs & Services → Credentials → Create credentials → OAuth client ID**, choose **Web application** and add these **Authorised JavaScript origins**:
-   - `https://<your-org-or-user>.github.io`
-   - `http://localhost:8000` (for local testing)
+4. Under **APIs & Services → Credentials → Create credentials → OAuth client ID**, choose **Web application** and add:
+   - **Authorised JavaScript origins** (for the sign-in popup):
+     - `https://<your-org-or-user>.github.io`
+     - `http://localhost:5500` (VS Code Live Server) and/or `http://localhost:8000` (`npm start`)
+   - **Authorised redirect URIs** (for "Sign in by redirect"): the exact page address, with the trailing slash:
+     - `https://<your-org-or-user>.github.io/tag-audit-studio/`
+     - `http://localhost:5500/` and/or `http://localhost:8000/`
 5. Copy the client ID into **Settings → Google sign-in → OAuth client ID** in the app. Each user then signs in with their own Google account and sees only the containers and properties they can access. All access is read-only.
+
+**If the sign-in popup closes and nothing happens** (the button stays on "Waiting for Google…"), use **"Popup not working? Sign in by redirect"** next to the Sign in button. Corporate Chrome policies and security extensions can block the way the popup hands the token back to the page; the redirect goes to Google and back in the same tab, so they don't affect it. It needs the redirect URIs above.
 
 ## Running an audit
 
@@ -205,6 +211,6 @@ js/app.js           views, audit pipeline, exports
 ## Working in VS Code
 
 1. Open the folder in VS Code and install the recommended extensions when prompted (Live Server, ESLint, Prettier).
-2. Right-click `index.html` → **Open with Live Server** (it serves on `http://localhost:8000`, matching the OAuth origin above).
+2. Right-click `index.html` → **Open with Live Server** (it serves on `http://localhost:5500` by default, matching the OAuth origin above).
    Alternatives: `npm start` (needs Node.js) or `python -m http.server 8000`.
 3. Run `npm run check` to syntax-check the JavaScript before committing.

@@ -19,6 +19,7 @@ function freshAudit_() {
     ids: {}, userProps: new Set(), currencies: [], paymentDomains: [], extraRows: [],
     pageScanned: false, fullDetail: false, ga4PropertyChecked: false,
     ga4Data: null,      // { [measurementId]: property data | { error } } — filled by google.js
+    gtagStreams: null,  // { [measurementId]: published gtag.js source } — filled by app.js
     liveData: null,     // stored live consent test — filled by app.js
     liveTest: null
   };
@@ -116,11 +117,89 @@ function workspaceRowsFromData_(workspaces, id) {
 
 // ── GA4 property checks (data fetched by google.js) ─────────────────
 
+// ── GA4 data stream settings (from the published gtag.js) ───────────
+
+const GTAG_AUTO_EVENT_FLAGS = [
+  ['vtp_enableScroll', 'scrolls'], ['vtp_enableOutboundClick', 'outbound clicks'], ['vtp_enableDownload', 'file downloads'],
+  ['vtp_enableForm', 'form interactions'], ['vtp_enableVideo', 'video engagement'], ['vtp_enableHistoryEvents', 'page changes (history)']
+];
+const GTAG_EM_TAGS = {
+  scroll: 'scrolls', outbound_click: 'outbound clicks', download: 'file downloads', form: 'form interactions',
+  video: 'video engagement', site_search: 'site search'
+};
+
+/**
+ * Reads the data stream settings Google compiles into gtag.js?id=G-…:
+ * enhanced measurement, Google signals, email redaction and automatic user-provided data.
+ * Returns null when the file has no readable container data.
+ */
+function parseGtagStreamSettings_(js) {
+  const data = parseContainerData_(js);
+  const tags = data && data.resource && data.resource.tags;
+  if (!tags) return null;
+  const first = fn => tags.filter(t => t.function === fn)[0];
+  const enhanced = new Set();
+  const auto = first('__ogt_auto_events');
+  if (auto) GTAG_AUTO_EVENT_FLAGS.forEach(f => { if (auto[f[0]] === true) enhanced.add(f[1]); });
+  tags.forEach(t => {
+    const m = /^__ccd_em_(\w+)$/.exec(t.function || '');
+    if (!m) return;
+    if (GTAG_EM_TAGS[m[1]]) enhanced.add(GTAG_EM_TAGS[m[1]]);
+    if (m[1] === 'page_view' && t.vtp_historyEvents === true) enhanced.add('page changes (history)');
+  });
+  const signals = first('__ogt_google_signals');
+  const redact = first('__ccd_auto_redact');
+  const upd = first('__ogt_1p_data_v2');
+  const autoUserData = upd && upd.vtp_isEnabled && upd.vtp_isAutoEnabled
+    ? [['vtp_autoEmailEnabled', 'email'], ['vtp_autoPhoneEnabled', 'phone'], ['vtp_autoAddressEnabled', 'address']]
+        .filter(f => upd[f[0]] === true).map(f => f[1])
+    : [];
+  return {
+    enhanced: Array.from(enhanced),
+    googleSignals: signals ? String(signals.vtp_googleSignals || '') : '',
+    redactEmail: redact ? redact.vtp_redactEmail === true : null,
+    autoUserData: autoUserData
+  };
+}
+
+function runGtagStreamChecks_() {
+  if (!AUDIT.gtagStreams) return;
+  Object.keys(AUDIT.gtagStreams).forEach(mid => {
+    const s = parseGtagStreamSettings_(AUDIT.gtagStreams[mid]);
+    if (!s) return;
+    const where = mid + ' · data stream';
+    if (s.redactEmail === false) {
+      recordIssue_('GA4 Setup', 'Low', mid + ': email redaction is off',
+                   'Turn on email redaction (Admin → Data streams → the stream → Redact data) so email addresses in URLs are not sent to GA4',
+                   where);
+    }
+    if (s.autoUserData.length) {
+      recordIssue_('GA4 Setup', 'Low', mid + ': automatic collection of user-provided data is on (' + s.autoUserData.join(', ') + ')',
+                   'Confirm the privacy policy and consent banner cover hashed form data being sent to Google, or turn it off in the Google tag settings',
+                   where, null, { row: false });
+    }
+    AUDIT.extraRows.push(row_('📊 GA4 Data Stream Settings', mid, 'Published Google tag (gtag.js)', joinParts_(
+      'Enhanced measurement: ' + (s.enhanced.length ? s.enhanced.join(', ') : 'off'),
+      s.googleSignals && 'Google signals: ' + s.googleSignals.toLowerCase(),
+      s.redactEmail !== null && 'Email redaction: ' + (s.redactEmail ? 'on' : 'off'),
+      'Automatic user-provided data: ' + (s.autoUserData.length ? s.autoUserData.join(', ') : 'off')
+    ), 'Read from the public Google tag; no sign-in needed'));
+  });
+}
+
 function runGa4PropertyChecks_() {
   const S = readClientSettings_();
-  if (S.ga4Checks === 'No' || !AUDIT.ga4Data) return;
+  if (S.ga4Checks === 'No') return;
+  runGtagStreamChecks_();
+  if (!AUDIT.ga4Data) return;
   Object.keys(AUDIT.ga4Data).forEach(mid => {
     const d = AUDIT.ga4Data[mid];
+    if (d.noAccess && d.skipped && d.skipped.length) {
+      recordIssue_('GA4 Property', 'Low', mid + ': GA4 property not found — ' + d.skipped.length +
+                   ' propert(ies) could not be read because of Google API errors',
+                   'Re-run the audit later; the ID may be in one of these properties', mid, d.skipped);
+      return;
+    }
     if (d.noAccess) {
       recordIssue_('GA4 Property', 'Low', mid + ': no access to its GA4 property',
                    'Sign in with an account that has Viewer access to run these checks', mid);
