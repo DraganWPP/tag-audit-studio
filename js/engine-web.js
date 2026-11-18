@@ -20,6 +20,7 @@ function freshAudit_() {
     pageScanned: false, fullDetail: false, ga4PropertyChecked: false,
     ga4Data: null,      // { [measurementId]: property data | { error } } — filled by google.js
     gtagStreams: null,  // { [measurementId]: published gtag.js source } — filled by app.js
+    gtagSettings: {},   // { [measurementId]: parsed stream settings } — filled by runGtagStreamChecks_
     liveData: null,     // stored live consent test — filled by app.js
     liveTest: null
   };
@@ -167,6 +168,7 @@ function runGtagStreamChecks_() {
   Object.keys(AUDIT.gtagStreams).forEach(mid => {
     const s = parseGtagStreamSettings_(AUDIT.gtagStreams[mid]);
     if (!s) return;
+    AUDIT.gtagSettings[mid] = s;   // kept in the result for the GA4 report
     const where = mid + ' · data stream';
     if (s.redactEmail === false) {
       recordIssue_('GA4 Setup', 'Low', mid + ': email redaction is off',

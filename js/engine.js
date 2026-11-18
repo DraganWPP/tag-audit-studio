@@ -1931,7 +1931,9 @@ function recordTag_(o, label, summary, source, group) {
   if (o.type === 'gaawe' && !o.paused) {
     const name = o.p.get('eventName');
     const params = o.p.pairs('eventSettingsTable').concat(o.p.pairs('eventParameters')).map(x => x.k);
-    if (name) AUDIT.ga4Events.push({ name: name, params: params, where: source + (o.name ? ' · ' + o.name : '') });
+    // Destination measurement ID when the tag names it directly (not via a variable)
+    const mid = ((o.p.get('measurementIdOverride') || o.p.get('measurementId') || '').match(/^G-[A-Z0-9]{4,20}$/) || [])[0] || '';
+    if (name) AUDIT.ga4Events.push({ name: name, params: params, where: source + (o.name ? ' · ' + o.name : ''), mid: mid });
   }
 
   // Custom HTML / template security

@@ -115,10 +115,19 @@ const Google = {
   },
 
   /** GET with retries on rate limits. */
-  async get(url) {
+  get(url) { return this.request(url); },
+
+  /** POST a JSON body (GA4 Data API reports), with the same retries. */
+  post(url, body) {
+    return this.request(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  },
+
+  async request(url, init) {
     if (!this.isSignedIn()) throw new Error('Not signed in to Google (or the session expired). Sign in again.');
+    init = init || {};
     for (let attempt = 0; ; attempt++) {
-      const res = await fetch(url, { headers: { Authorization: 'Bearer ' + this.token } });
+      const res = await fetch(url, Object.assign({}, init,
+        { headers: Object.assign({ Authorization: 'Bearer ' + this.token }, init.headers || {}) }));
       if (res.ok) return res.json();
       const body = await res.text();
       if ((res.status === 429 || res.status >= 500) && attempt < 4) {
@@ -136,7 +145,8 @@ const Google = {
     do {
       const sep = url.indexOf('?') >= 0 ? '&' : '?';
       const page = await this.get(url + (token ? sep + 'pageToken=' + encodeURIComponent(token) : ''));
-      out = out.concat(page[field] || []);
+      // Fall back to the first list in the page if Google names the field differently
+      out = out.concat(page[field] || Object.keys(page).map(k => page[k]).filter(Array.isArray)[0] || []);
       token = page.nextPageToken;
     } while (token);
     return out;
@@ -147,7 +157,8 @@ function googleErrorMessage_(status, body) {
   let msg = '';
   try { msg = JSON.parse(body).error.message; } catch (e) { msg = body.slice(0, 200); }
   if (status === 403 && /has not been used|is disabled/i.test(msg)) {
-    return 'This API is not enabled in your Google Cloud project. Enable the Tag Manager API and the Google Analytics Admin API (see README). Details: ' + msg;
+    return 'This API is not enabled in your Google Cloud project. Enable the Tag Manager API, the Google Analytics Admin API ' +
+      'and the Google Analytics Data API (see README). Details: ' + msg;
   }
   if (status === 401) return 'Your Google session expired. Sign in again.';
   if (status === 403) return 'No access: ' + msg;
@@ -417,5 +428,248 @@ async function fetchGa4PropertyData(mid, progress, hints, force) {
     keyEvents: (keys || []).map(k => k.eventName),
     adsLinks: adsLinks === null ? null : adsLinks.length,
     bigQuery: bq === null ? null : bq.length
+  };
+}
+
+// ── GA4 audit: full property read (Admin API + Data API) ────────────
+
+const GA4_DATA_API = 'https://analyticsdata.googleapis.com/';
+const GA4_DATE_RANGE = [{ startDate: '28daysAgo', endDate: 'yesterday' }];
+
+/** Every GA4 property the signed-in account can see, for the GA4 audit picker. */
+async function listGa4Properties() {
+  const summaries = await Google.listAll(GA4_API + 'v1beta/accountSummaries?pageSize=200', 'accountSummaries');
+  const out = [];
+  summaries.forEach(acc => (acc.propertySummaries || []).forEach(ps => out.push({
+    property: ps.property, displayName: ps.displayName || ps.property, account: acc.displayName || acc.account,
+    propertyType: ps.propertyType || ''
+  })));
+  return out;
+}
+
+/** Runs async tasks with at most `limit` in flight. Resolves with results in task order. */
+async function runPooled_(tasks, limit) {
+  const results = new Array(tasks.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < tasks.length) {
+      const i = next++;
+      results[i] = await tasks[i]();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+  return results;
+}
+
+/** Data API report rows as { d: [dimension values], m: [numbers] }. */
+function ga4ReportRows_(report) {
+  return ((report && report.rows) || []).map(r => ({
+    d: (r.dimensionValues || []).map(v => v.value),
+    m: (r.metricValues || []).map(v => Number(v.value) || 0)
+  }));
+}
+
+function ga4ReportTotal_(report) {
+  const t = report && report.totals && report.totals[0];
+  return t ? Number(t.metricValues[0].value) || 0 : null;
+}
+
+const GA4_PII_KEYS = 'e-?mail|mail|phone|tel|mobile|firstname|first_name|lastname|last_name|surname|fullname|name|address|postcode|zip';
+const GA4_PII_URL_REGEX = '(@|%40|[?&;](' + GA4_PII_KEYS + ')=)';
+
+/** Masks anything in a URL that may identify a person. Only the masked form is ever stored. */
+function maskPiiUrl_(url) {
+  return String(url || '')
+    .replace(/[A-Z0-9._%+-]+(@|%40)[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email]')
+    .replace(new RegExp('([?&;](?:' + GA4_PII_KEYS + ')=)[^&;#]*', 'gi'), '$1[redacted]')
+    .replace(/\d{6,}/g, '[number]')
+    .slice(0, 160);
+}
+
+/**
+ * Reads everything the GA4 audit needs for one property. Every call is optional:
+ * a failure is listed in `unavailable` and never stops the audit (except an expired sign-in).
+ * Page URLs that look like they contain personal data are masked here, before anything is stored.
+ */
+async function fetchGa4Full(prop, progress) {
+  const p = prop.property;
+  const name = prop.displayName || p;
+  const unavailable = [];
+  const soft = (label, fn, fallback) => fn().catch(e => {
+    if (e.status === 401) throw e;
+    unavailable.push(label + (e.status ? ' (HTTP ' + e.status + ')' : ''));
+    return fallback;
+  });
+  const B = GA4_API + 'v1beta/' + p, A = GA4_API + 'v1alpha/' + p;
+  const list = (base, path) => Google.listAll(base + '/' + path + '?pageSize=200', path);
+
+  progress && progress('Reading GA4 settings for "' + name + '"…');
+  const admin = {};
+  const adminTasks = [
+    ['property', 'Property details', () => Google.get(B), {}],
+    ['streams', 'Data streams', () => list(B, 'dataStreams'), []],
+    ['retention', 'Data retention', () => Google.get(B + '/dataRetentionSettings'), null],
+    ['customDimensions', 'Custom dimensions', () => list(B, 'customDimensions'), null],
+    ['customMetrics', 'Custom metrics', () => list(B, 'customMetrics'), null],
+    ['keyEvents', 'Key events', () => list(B, 'keyEvents'), null],
+    ['adsLinks', 'Google Ads links', () => list(B, 'googleAdsLinks'), null],
+    ['firebaseLinks', 'Firebase links', () => list(B, 'firebaseLinks'), null],
+    ['signals', 'Google signals settings', () => Google.get(A + '/googleSignalsSettings'), null],
+    ['attribution', 'Attribution settings', () => Google.get(A + '/attributionSettings'), null],
+    ['audiences', 'Audiences', () => list(A, 'audiences'), null],
+    ['channelGroups', 'Channel groups', () => list(A, 'channelGroups'), null],
+    ['calculatedMetrics', 'Calculated metrics', () => list(A, 'calculatedMetrics'), null],
+    ['bigQueryLinks', 'BigQuery links', () => list(A, 'bigQueryLinks'), null],
+    ['dv360Links', 'Display & Video 360 links', () => list(A, 'displayVideo360AdvertiserLinks'), null],
+    ['sa360Links', 'Search Ads 360 links', () => list(A, 'searchAds360Links'), null],
+    ['adSenseLinks', 'AdSense links', () => list(A, 'adSenseLinks'), null],
+    ['annotations', 'Annotations', () => list(A, 'reportingDataAnnotations'), null]
+  ];
+  await runPooled_(adminTasks.map(t => async () => { admin[t[0]] = await soft(t[1], t[2], t[3]); }), 5);
+
+  // Account-level data sharing settings
+  const parent = admin.property && admin.property.parent;
+  admin.dataSharing = parent ? await soft('Account data sharing settings',
+    () => Google.get(GA4_API + 'v1beta/' + parent + '/dataSharingSettings'), null) : null;
+
+  // Per-stream settings
+  progress && progress('Reading data stream settings for "' + name + '"…');
+  const streamTasks = [];
+  (admin.streams || []).forEach(s => {
+    const label = ' (' + (s.displayName || s.name) + ')';
+    s.extra = {};
+    const add = (key, text, fn, fallback) => streamTasks.push(async () => { s.extra[key] = await soft(text + label, fn, fallback); });
+    add('mpSecrets', 'Measurement Protocol secrets',
+      () => Google.listAll(GA4_API + 'v1beta/' + s.name + '/measurementProtocolSecrets?pageSize=200', 'measurementProtocolSecrets'), null);
+    if (s.type === 'WEB_DATA_STREAM') {
+      add('enhanced', 'Enhanced measurement', () => Google.get(GA4_API + 'v1alpha/' + s.name + '/enhancedMeasurementSettings'), null);
+      add('redaction', 'Data redaction', () => Google.get(GA4_API + 'v1alpha/' + s.name + '/dataRedactionSettings'), null);
+      add('createRules', 'Event create rules',
+        () => Google.listAll(GA4_API + 'v1alpha/' + s.name + '/eventCreateRules?pageSize=200', 'eventCreateRules'), null);
+      add('editRules', 'Event edit rules',
+        () => Google.listAll(GA4_API + 'v1alpha/' + s.name + '/eventEditRules?pageSize=200', 'eventEditRules'), null);
+    }
+  });
+  await runPooled_(streamTasks, 5);
+
+  // Collected data (Data API), last 28 days
+  progress && progress('Reading collected data (last 28 days) for "' + name + '"…');
+  const R = (dims, metrics, extra) => Object.assign({
+    dateRanges: GA4_DATE_RANGE,
+    dimensions: dims.map(n => ({ name: n })),
+    metrics: metrics.map(n => ({ name: n })),
+    limit: 1000
+  }, extra || {});
+  const exact = (field, value) => ({ filter: { fieldName: field, stringFilter: { matchType: 'EXACT', value: value } } });
+  const desc = metric => [{ metric: { metricName: metric }, desc: true }];
+  const batch = requests => Google.post(GA4_DATA_API + 'v1beta/' + p + ':batchRunReports', { requests: requests })
+    .then(res => res.reports || []);
+
+  const data = { thresholded: false, otherRow: false };
+  const note = report => {
+    const md = report && report.metadata || {};
+    if (md.subjectToThresholding) data.thresholded = true;
+    if (md.dataLossFromOtherRow) data.otherRow = true;
+  };
+  const b1 = await soft('Collected data: events, streams, hostnames, channels, sources', () => batch([
+    R(['eventName'], ['eventCount', 'totalUsers', 'keyEvents'], { orderBys: desc('eventCount') }),
+    R(['streamId', 'streamName'], ['eventCount']),
+    R(['hostName'], ['eventCount'], { orderBys: desc('eventCount'), limit: 200 }),
+    R(['sessionDefaultChannelGroup'], ['sessions']),
+    R(['sessionSource'], ['sessions'], { orderBys: desc('sessions'), limit: 200 })
+  ]), null);
+  if (b1) {
+    b1.forEach(note);
+    data.events = ga4ReportRows_(b1[0]).map(r => ({ name: r.d[0], count: r.m[0], users: r.m[1], keyEvents: r.m[2] }));
+    data.streams = ga4ReportRows_(b1[1]).map(r => ({ id: r.d[0], name: r.d[1], count: r.m[0] }));
+    data.hosts = ga4ReportRows_(b1[2]).map(r => ({ host: r.d[0], count: r.m[0] }));
+    data.channels = ga4ReportRows_(b1[3]).map(r => ({ name: r.d[0], sessions: r.m[0] }));
+    data.sources = ga4ReportRows_(b1[4]).map(r => ({ source: r.d[0], sessions: r.m[0] }));
+  }
+
+  const b2 = await soft('Collected data: landing pages, purchases, page URLs', () => batch([
+    R(['landingPage'], ['sessions'], { dimensionFilter: exact('landingPage', '(not set)'), limit: 1 }),
+    R(['transactionId'], ['eventCount'], { dimensionFilter: exact('eventName', 'purchase'), orderBys: desc('eventCount'), limit: 10000 }),
+    R([], ['purchaseRevenue', 'ecommercePurchases']),
+    R(['pagePathPlusQueryString'], ['screenPageViews'], {
+      dimensionFilter: { filter: { fieldName: 'pagePathPlusQueryString',
+        stringFilter: { matchType: 'PARTIAL_REGEXP', value: GA4_PII_URL_REGEX, caseSensitive: false } } },
+      orderBys: desc('screenPageViews'), limit: 50
+    })
+  ]), null);
+  if (b2) {
+    b2.forEach(note);
+    const landing = ga4ReportRows_(b2[0])[0];
+    data.landingNotSet = landing ? landing.m[0] : 0;
+    const tx = ga4ReportRows_(b2[1]);
+    const totals = ga4ReportRows_(b2[2])[0] || { m: [0, 0] };
+    data.purchases = {
+      events: tx.reduce((s, r) => s + r.m[0], 0),
+      ids: tx.filter(r => r.d[0] !== '(not set)').length,
+      notSet: (tx.find(r => r.d[0] === '(not set)') || { m: [0] }).m[0],
+      duplicateIds: tx.filter(r => r.d[0] !== '(not set)' && r.m[0] > 1).length,
+      revenue: totals.m[0], ecommercePurchases: totals.m[1]
+    };
+    data.piiPages = ga4ReportRows_(b2[3]).map(r => ({ masked: maskPiiUrl_(r.d[0]), views: r.m[0] }));
+  }
+
+  // How often each custom dimension is empty
+  const dims = (admin.customDimensions || []).filter(x => x.scope === 'EVENT' || x.scope === 'USER').slice(0, 25);
+  if (dims.length && b1) {
+    const reqs = dims.map(x => R([(x.scope === 'USER' ? 'customUser:' : 'customEvent:') + x.parameterName], ['eventCount'],
+      { metricAggregations: ['TOTAL'], orderBys: desc('eventCount') }));
+    const chunks = [];
+    for (let i = 0; i < reqs.length; i += 5) chunks.push(reqs.slice(i, i + 5));
+    const reports = await soft('Collected data: custom dimension fill rates',
+      async () => [].concat(...(await runPooled_(chunks.map(c => () => batch(c)), 2))), null);
+    if (reports) {
+      reports.forEach(note);
+      data.dimFill = dims.map((x, i) => {
+        const rows = ga4ReportRows_(reports[i]);
+        const total = ga4ReportTotal_(reports[i]);
+        const notSet = (rows.find(r => r.d[0] === '(not set)') || { m: [0] }).m[0];
+        return { param: x.parameterName, scope: x.scope,
+                 total: total === null ? rows.reduce((s, r) => s + r.m[0], 0) : total, notSet: notSet };
+      });
+    }
+  }
+
+  data.realtime = await soft('Realtime data', () => Google.post(GA4_DATA_API + 'v1beta/' + p + ':runRealtimeReport',
+    { metrics: [{ name: 'eventCount' }] }).then(res => {
+      const row = ga4ReportRows_(res)[0];
+      return row ? row.m[0] : 0;
+    }), null);
+
+  // Keep only what the report needs (audiences, groups and metrics as names)
+  const names = (arr, f) => arr === null || arr === undefined ? null : arr.map(f || (x => x.displayName || x.name));
+  return {
+    property: p, displayName: name, account: prop.account || '', fetchedAt: new Date().toISOString(),
+    admin: {
+      property: admin.property || {},
+      streams: (admin.streams || []).map(s => ({
+        id: String(s.name || '').split('/').pop(), name: s.name, type: s.type, displayName: s.displayName,
+        measurementId: s.webStreamData && s.webStreamData.measurementId || '',
+        defaultUri: s.webStreamData && s.webStreamData.defaultUri || '',
+        enhanced: s.extra.enhanced || null, redaction: s.extra.redaction || null,
+        createRules: s.extra.createRules ? s.extra.createRules.map(r => ({ destinationEvent: r.destinationEvent })) : null,
+        editRules: s.extra.editRules ? s.extra.editRules.map(r => ({ displayName: r.displayName })) : null,
+        mpSecrets: s.extra.mpSecrets ? s.extra.mpSecrets.length : null
+      })),
+      retention: admin.retention,
+      customDimensions: names(admin.customDimensions, x => ({ parameterName: x.parameterName, displayName: x.displayName, scope: x.scope })),
+      customMetrics: names(admin.customMetrics, x => ({ parameterName: x.parameterName, displayName: x.displayName })),
+      keyEvents: names(admin.keyEvents, x => ({ eventName: x.eventName, countingMethod: x.countingMethod, custom: x.custom })),
+      adsLinks: names(admin.adsLinks, x => ({ customerId: x.customerId, adsPersonalizationEnabled: x.adsPersonalizationEnabled })),
+      firebaseLinks: names(admin.firebaseLinks, x => x.project || x.name),
+      signals: admin.signals, attribution: admin.attribution, dataSharing: admin.dataSharing,
+      audiences: names(admin.audiences), channelGroups: names(admin.channelGroups), calculatedMetrics: names(admin.calculatedMetrics),
+      bigQueryLinks: names(admin.bigQueryLinks, x => x.project || x.name),
+      dv360Links: names(admin.dv360Links, x => x.advertiserDisplayName || x.advertiserId || x.name),
+      sa360Links: names(admin.sa360Links, x => x.advertiserDisplayName || x.advertiserId || x.name),
+      adSenseLinks: names(admin.adSenseLinks, x => x.adClientCode || x.name),
+      annotations: names(admin.annotations, x => x.title || x.name)
+    },
+    data: data,
+    unavailable: unavailable
   };
 }
