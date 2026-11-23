@@ -83,6 +83,12 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 .nav-ga4 { margin-top: 14px; }
 .rail-foot { padding: 12px 10px 0; border-top: 1px solid #2A3B5C; margin-top: 12px; }
 .rail-foot .link { color: var(--rail-ink); }
+.rail-google { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-bottom: 10px; font-size: .85rem; }
+.rail-google .rail-signed { color: var(--rail-ink); opacity: .8; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-google:empty { display: none; }
+.signed .account { font-family: var(--mono); font-weight: 500; font-size: .85rem; }
+details.advanced { margin-top: 14px; }
+details.advanced > summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
 
 /* ── Main column ─────────────────────────────────────────────────── */
 main { padding: 36px clamp(16px, 4vw, 56px) 80px; outline: none; min-width: 0; }

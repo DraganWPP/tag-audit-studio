@@ -108,9 +108,67 @@ function setView(view) {
     if (b.dataset.view === view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   });
   VIEWS[view]();
+  updateGoogleStatus();
   try { history.replaceState(null, '', '#' + view); } catch (e) { /* ignore */ }
   $('#main').focus({ preventScroll: true });
   window.scrollTo(0, 0);
+}
+
+// ── Google sign-in (one control, shown in the rail and in the forms that need it) ──
+
+function googleClientId() {
+  return (loadAppSettings().googleClientId || '').trim() || APP_CONFIG.googleClientId;
+}
+
+function googleStatusHtml() {
+  if (Google.isSignedIn()) {
+    return `<span class="signed">Signed in${Google.user ? ' as <span class="account">' + esc(Google.user) + '</span>' : ' to Google'}</span>
+      <button class="link" data-act="signout">Sign out</button>`;
+  }
+  return (Google.hasExpired() ? '<span class="hint" style="margin:0">Your Google sign-in has expired (it lasts an hour).</span> ' : '') +
+    `<button class="btn secondary" data-act="signin">${Google.hasExpired() ? 'Sign in again' : 'Sign in with Google'}</button>`;
+}
+
+function updateGoogleStatus() {
+  const el = $('#rail-google');
+  if (!el) return;
+  el.innerHTML = Google.isSignedIn()
+    ? `<span class="rail-signed" title="${esc(Google.user || 'Signed in to Google')}">Google: ${esc(Google.user || 'signed in')}</span>
+       <button class="link" data-act="signout">Sign out</button>`
+    : `<button class="link" data-act="signin">${Google.hasExpired() ? 'Google sign-in expired: sign in again' : 'Sign in with Google'}</button>`;
+}
+
+/**
+ * The sign-in leaves the page and comes back, so results in memory are kept for this tab
+ * in sessionStorage first. Returns false if the user chooses to stay (results too large to keep).
+ */
+const SIGNIN_STASH_KEY = 'tas.signinStash';
+function stashForSignIn() {
+  saveDraft();
+  if (!STATE.result && !STATE.ga4.result) return true;
+  try {
+    sessionStorage.setItem(SIGNIN_STASH_KEY, JSON.stringify({
+      result: STATE.result, ga4: STATE.ga4.result, ai: { writeup: STATE.ai.writeup, fixplan: STATE.ai.fixplan, chat: STATE.ai.chat },
+      overrides: STATE.overrides, ga4Index: STATE.ga4.index, ga4Tab: STATE.ga4.tab
+    }));
+    return true;
+  } catch (e) {
+    return confirm('Signing in reloads the page, and this audit is too large to keep for the trip.\n\n' +
+                   'Choose Cancel and use "Save audit" first, or OK to sign in and lose the current results.');
+  }
+}
+
+function restoreSignInStash() {
+  let s = null;
+  try { s = JSON.parse(sessionStorage.getItem(SIGNIN_STASH_KEY) || 'null'); sessionStorage.removeItem(SIGNIN_STASH_KEY); }
+  catch (e) { return; }
+  if (!s) return;
+  STATE.result = s.result || null;
+  STATE.ga4.result = s.ga4 || null;
+  STATE.ga4.index = s.ga4Index || 0;
+  STATE.ga4.tab = s.ga4Tab || 'overview';
+  STATE.ai = Object.assign(STATE.ai, s.ai || {});
+  STATE.overrides = s.overrides || {};
 }
 
 function updateNav() {
@@ -303,26 +361,56 @@ async function runAudit(opts) {
     if ((i.rules.ga4Checks || 'Auto') !== 'No' && liveMids.length) {
       // Data stream settings from the public Google tag (no sign-in needed)
       AUDIT.gtagStreams = {};
-      for (const mid of liveMids) {
-        log('Reading the published Google tag for ' + mid + '…');
-        const g = await fetchPublicGtag(mid);
-        if (g.js) AUDIT.gtagStreams[mid] = g.js;
-        else log(mid + ': Google tag could not be downloaded (' + (g.code ? 'HTTP ' + g.code : g.error || 'network error') + ')', true);
-      }
+      log('Reading the published Google tag for ' + liveMids.join(', ') + '…');
+      const gtags = await Promise.all(liveMids.map(fetchPublicGtag));
+      gtags.forEach((g, n) => {
+        if (g.js) AUDIT.gtagStreams[liveMids[n]] = g.js;
+        else log(liveMids[n] + ': Google tag could not be downloaded (' + (g.code ? 'HTTP ' + g.code : g.error || 'network error') + ')', true);
+      });
     }
+    const ga4FetchedNow = new Set();   // GA4 properties read in full during this run (not read twice)
     if (i.ga4 && (i.rules.ga4Checks || 'Auto') !== 'No') {
       const mids = liveMids;
       if (mids.length && Google.isSignedIn()) {
         AUDIT.ga4Data = {};
-        for (const mid of Array.from(new Set(mids))) {
-          try {
-            if (!STATE.caches.ga4[mid] || opts.refresh) {
-              STATE.caches.ga4[mid] = await fetchGa4PropertyData(mid, log, { client: i.client, site: i.site }, !!opts.refresh);
+        const hints = { client: i.client, site: i.site };
+        if (i.ga4Full) {
+          // One full read per property serves both the GTM report's GA4 checks and the GA4 report
+          const props = {};
+          for (const mid of mids) {
+            try {
+              const lookup = await findGa4Property(mid, log, hints, !!opts.refresh);
+              if (!lookup.property) { AUDIT.ga4Data[mid] = { noAccess: true, skipped: lookup.skipped }; continue; }
+              const p = lookup.property;
+              STATE.ga4.known[p.property] = { property: p.property, displayName: p.displayName, account: p.account };
+              props[mid] = p;
+            } catch (e) {
+              AUDIT.ga4Data[mid] = { error: e.message };
+              log(mid + ': ' + e.message, true);
             }
-            AUDIT.ga4Data[mid] = STATE.caches.ga4[mid];
-          } catch (e) {
-            AUDIT.ga4Data[mid] = { error: e.message };
-            log(mid + ': ' + e.message, true);
+          }
+          const names = Array.from(new Set(Object.keys(props).map(mid => props[mid].property)));
+          const failed = {};
+          await runPooled_(names.map(name => async () => {
+            if (STATE.caches.ga4full[name] && !opts.refresh) return;
+            try {
+              STATE.caches.ga4full[name] = await fetchGa4Full(STATE.ga4.known[name], log);
+              ga4FetchedNow.add(name);
+            } catch (e) { failed[name] = e.message; log(STATE.ga4.known[name].displayName + ': ' + e.message, true); }
+          }), 2);
+          Object.keys(props).forEach(mid => {
+            const name = props[mid].property;
+            AUDIT.ga4Data[mid] = failed[name] ? { error: failed[name] } : ga4PropertyDataFromFull(STATE.caches.ga4full[name], props[mid]);
+          });
+        } else {
+          for (const mid of mids) {
+            try {
+              if (!STATE.caches.ga4[mid] || opts.refresh) STATE.caches.ga4[mid] = await fetchGa4PropertyData(mid, log, hints, !!opts.refresh);
+              AUDIT.ga4Data[mid] = STATE.caches.ga4[mid];
+            } catch (e) {
+              AUDIT.ga4Data[mid] = { error: e.message };
+              log(mid + ': ' + e.message, true);
+            }
           }
         }
         sources.push('GA4 Admin API');
@@ -342,7 +430,7 @@ async function runAudit(opts) {
       if (found.length) {
         found.forEach(p => { STATE.ga4.known[p.property] = p; });
         STATE.ga4.selected = Array.from(new Set(found.map(p => p.property)));
-        await runGa4Audit({ stay: true, refresh: !!opts.refresh });
+        await runGa4Audit({ stay: true, refresh: !!opts.refresh, fresh: ga4FetchedNow });
       }
     }
     saveDraft();
@@ -438,11 +526,7 @@ function renderAudit() {
         <div><h3>GTM and GA4 via Google</h3><p class="what">Real tag names, triggers, folders, unpublished changes and GA4 property settings.</p><span class="tag">Needs read access</span></div>
         <div>
           <div class="row" style="margin-bottom:10px">
-            ${Google.isSignedIn()
-              ? '<span class="signed">Signed in to Google</span> <button class="link" data-act="signout">Sign out</button>'
-              : '<button class="btn secondary" data-act="signin">Sign in with Google</button>' +
-                (s.googleClientId ? ' <button class="link" data-act="signin-redirect">Popup not working? Sign in by redirect</button>'
-                  : ' <span class="hint">Add a Google OAuth client ID in <button class="link" data-act="goto" data-view="settings">Settings</button> first.</span>')}
+            ${googleStatusHtml()}
           </div>
           <label for="in-api">GTM container IDs to read through the API</label>
           <input type="text" id="in-api" value="${esc(i.apiIds)}" placeholder="GTM-XXXXXXX">
@@ -1425,11 +1509,15 @@ function renderSettings() {
 
     <section class="form-block">
       <h2 style="margin-top:0">Google sign-in</h2>
-      <label for="set-client">OAuth client ID</label>
-      <input type="text" id="set-client" value="${esc(s.googleClientId || '')}" placeholder="1234567890-abc.apps.googleusercontent.com">
-      <p class="hint">Create a "Web application" OAuth client in Google Cloud with this site's address as an authorised JavaScript origin, and enable the Tag Manager API and Google Analytics Admin API. See the README.</p>
-      <div class="actions"><button class="btn" data-act="save-google">Save</button>
-        ${Google.isSignedIn() ? '<button class="btn secondary" data-act="signout">Sign out of Google</button>' : '<button class="btn secondary" data-act="signin">Sign in with Google</button> <button class="link" data-act="signin-redirect">Popup not working? Sign in by redirect</button>'}</div>
+      <div class="row">${googleStatusHtml()}</div>
+      <p class="hint">Read-only access to Tag Manager and Analytics. The sign-in lasts an hour and is kept in this browser tab only; closing the tab signs you out.</p>
+      <details class="advanced">
+        <summary>Advanced: use a different OAuth client</summary>
+        <label for="set-client" style="margin-top:10px">OAuth client ID override</label>
+        <input type="text" id="set-client" value="${esc(s.googleClientId || '')}" placeholder="${esc(APP_CONFIG.googleClientId)}">
+        <p class="hint">Leave empty to use the built-in client. A different client needs this page's address (${esc(location.origin + location.pathname)}) as an authorised redirect URI in Google Cloud. See the README.</p>
+        <div class="actions"><button class="btn secondary" data-act="save-google">Save override</button></div>
+      </details>
     </section>
 
     <section class="form-block">
@@ -1501,7 +1589,14 @@ async function loadGa4Properties() {
   if (g.loading) return;
   g.loading = true;
   try {
-    g.props = await listGa4Properties();
+    // The list is kept for this tab, so the GA4 page opens instantly after a reload or sign-in
+    let cached = null;
+    try { cached = JSON.parse(sessionStorage.getItem('tas.ga4Props') || 'null'); } catch (e) { /* ignore */ }
+    if (cached && cached.token === Google.token.slice(-12)) g.props = cached.list;
+    else {
+      g.props = await listGa4Properties();
+      try { sessionStorage.setItem('tas.ga4Props', JSON.stringify({ token: Google.token.slice(-12), list: g.props })); } catch (e) { /* ignore */ }
+    }
     // Tick the properties found by the GTM audit (cached lookups only; no extra API calls)
     if (!g.selected.length) {
       ga4IdsFromGtm().forEach(x => { if (x.prop && g.selected.indexOf(x.prop.property) < 0) g.selected.push(x.prop.property); });
@@ -1527,10 +1622,14 @@ async function runGa4Audit(opts) {
   try {
     const gtm = ga4GtmContext(STATE.result);
     const meta = { client: STATE.inputs.client, site: STATE.inputs.site, date: new Date().toISOString() };
+    // Read the properties two at a time; skip any already read in full during this run
+    const fresh = opts.fresh || new Set();
+    await runPooled_(g.selected.map(name => async () => {
+      const info = (g.props || []).find(p => p.property === name) || g.known[name] || { property: name, displayName: name };
+      if (!STATE.caches.ga4full[name] || (opts.refresh && !fresh.has(name))) STATE.caches.ga4full[name] = await fetchGa4Full(info, ga4Log);
+    }), 2);
     const properties = [];
     for (const name of g.selected) {
-      const info = (g.props || []).find(p => p.property === name) || g.known[name] || { property: name, displayName: name };
-      if (!STATE.caches.ga4full[name] || opts.refresh) STATE.caches.ga4full[name] = await fetchGa4Full(info, ga4Log);
       const res = buildGa4Result(STATE.caches.ga4full[name], gtm, meta);
       properties.push(res);
       ga4Log('GA4 audit of "' + res.displayName + '": grade ' + res.score.grade + ' (' + res.score.score + '/100), ' + res.issues.length + ' issue(s)' +
@@ -1665,12 +1764,8 @@ function renderGa4Start() {
     <p class="lede">A separate report on GA4 properties: every setting the GA4 Admin API can read, plus the last 28 days of collected data from the Data API, cross-checked against the GTM audit when there is one.</p>
     <section class="form-block">
       <h2 style="margin-top:0">Google sign-in</h2>
-      <div class="row">${signed
-        ? '<span class="signed">Signed in to Google</span> <button class="link" data-act="signout">Sign out</button>'
-        : '<button class="btn secondary" data-act="signin">Sign in with Google</button>' +
-          (s.googleClientId ? ' <button class="link" data-act="signin-redirect">Popup not working? Sign in by redirect</button>'
-            : ' <span class="hint">Add a Google OAuth client ID in <button class="link" data-act="goto" data-view="settings">Settings</button> first.</span>')}</div>
-      <p class="hint">Needs read access to the GA4 property, and the Google Analytics Admin API and Data API enabled in your Google Cloud project.</p>
+      <div class="row">${googleStatusHtml()}</div>
+      <p class="hint">Needs read access to the GA4 properties you want to audit.</p>
     </section>
     <section class="form-block">
       <h2 style="margin-top:0">Client</h2>
@@ -1841,19 +1936,10 @@ document.addEventListener('click', async e => {
         }
         break;
       case 'goto': setView(el.dataset.view); break;
-      case 'signin': {
-        const clientId = ($('#set-client') && $('#set-client').value.trim()) || loadAppSettings().googleClientId;
-        if ($('#set-client') && clientId) saveAppSettings({ googleClientId: clientId });
-        el.disabled = true; el.textContent = 'Waiting for Google…';
-        try { await Google.signIn(clientId); }
-        finally { el.disabled = false; el.textContent = 'Sign in with Google'; }
-        toast('Signed in to Google'); VIEWS[STATE.view](); break;
-      }
+      case 'signin':
       case 'signin-redirect': {
-        const clientId = ($('#set-client') && $('#set-client').value.trim()) || loadAppSettings().googleClientId;
-        if ($('#set-client') && clientId) saveAppSettings({ googleClientId: clientId });
-        saveDraft();
-        Google.signInRedirect(clientId, STATE.view);
+        if (!stashForSignIn()) break;
+        Google.signInRedirect(googleClientId(), STATE.view);
         break;
       }
       case 'ga4-run': await runGa4Audit(); break;
@@ -1881,7 +1967,7 @@ document.addEventListener('click', async e => {
         renderGa4();
         break;
       }
-      case 'signout': Google.signOut(); toast('Signed out of Google'); VIEWS[STATE.view](); break;
+      case 'signout': Google.signOut(); toast('Signed out of Google'); VIEWS[STATE.view](); updateGoogleStatus(); break;
       case 'load-workspaces': {
         const ids = parseIds(STATE.inputs.apiIds);
         if (!ids.length) throw new Error('Enter a GTM container ID first.');
@@ -1945,9 +2031,16 @@ document.addEventListener('click', async e => {
         finally { el.disabled = false; el.textContent = 'Test connection'; }
         break;
       }
-      case 'save-google': saveAppSettings({ googleClientId: $('#set-client').value.trim() }); toast('Google settings saved'); break;
+      case 'save-google': {
+        const override = $('#set-client').value.trim();
+        saveAppSettings({ googleClientId: override });
+        if (Google.isSignedIn()) Google.signOut();   // the old token belongs to the previous client
+        toast(override ? 'OAuth client override saved. Sign in again.' : 'Using the built-in OAuth client');
+        renderSettings(); updateGoogleStatus(); break;
+      }
       case 'clear-data':
-        ['tas.settings', 'tas.draft', 'tas.gtmPaths', 'tas.ga4Streams', 'tas.ga4Misses'].forEach(k => { try { localStorage.removeItem(k); } catch (x) { /* ignore */ } });
+        ['tas.settings', 'tas.draft', 'tas.gtmPaths', 'tas.ga4Streams', 'tas.ga4Misses', 'tas.googleHint'].forEach(k => { try { localStorage.removeItem(k); } catch (x) { /* ignore */ } });
+        try { sessionStorage.removeItem('tas.ga4Props'); } catch (x) { /* ignore */ }
         STATE.caches = { containers: {}, api: {}, ga4: {}, gtag: {}, ga4full: {} };
         toast('Saved settings and caches cleared'); renderSettings(); break;
     }
@@ -1991,8 +2084,16 @@ $('#open-audit-file').addEventListener('change', async e => {
 
 // ── Start ───────────────────────────────────────────────────────────
 applyTheme();
-updateNav();
-window.addEventListener('google-signed-in', () => { toast('Signed in to Google'); VIEWS[STATE.view](); });
+Google.restore();
 const oauthReturn = Google.consumeRedirect();
+if (oauthReturn) restoreSignInStash();
+updateNav();
+window.addEventListener('google-session-changed', () => {
+  updateGoogleStatus();
+  if (['audit', 'ga4', 'settings'].indexOf(STATE.view) >= 0 && !STATE.running && !STATE.ga4.running) VIEWS[STATE.view]();
+});
 setView(oauthReturn ? oauthReturn.view : (location.hash || '#audit').slice(1));
 if (oauthReturn) toast(oauthReturn.error || 'Signed in to Google', !!oauthReturn.error);
+if (Google.isSignedIn() && !Google.user) {
+  Google.loadUser().then(() => window.dispatchEvent(new Event('google-session-changed')));
+}
