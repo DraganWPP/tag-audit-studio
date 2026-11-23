@@ -1969,11 +1969,18 @@ document.addEventListener('click', async e => {
           box.scrollTop = box.scrollHeight;
         };
         el.disabled = true; el.textContent = 'Testing…';
+        if ($('#cm360-manual')) $('#cm360-manual').remove();
         const pick = $('#cm360-profile');
         try {
           const s = await cm360ConnectionTest(out, pick ? pick.value : null);
-          out(s.download ? 'Result: CM360 reports can be read from the browser. The full CM360 feature is feasible.'
-                         : 'Result: see the failed step above.', !s.download);
+          if (s.pending) {
+            STATE.cm360Pending = s.pending;
+            box.insertAdjacentHTML('afterend', `<div class="actions" id="cm360-manual">
+              <a class="btn" href="${esc(s.pending.browserUrl)}" target="_blank" rel="noopener">Download report</a>
+              <label class="btn secondary" style="cursor:pointer">Add the downloaded CSV
+                <input type="file" id="cm360-file" accept=".csv,text/csv" hidden></label>
+              <button class="link" data-act="cm360-discard">Skip and delete the report</button></div>`);
+          }
         } catch (e) {
           out('Result: the test stopped at the step above.', true);
         } finally {
@@ -1987,6 +1994,16 @@ document.addEventListener('click', async e => {
                 `<option value="${esc(p.profileId)}">${esc(p.accountName)} (${esc(p.accountId)})</option>`).join('')}</select>`);
           }
         }
+        break;
+      }
+      case 'cm360-discard': {
+        const p = STATE.cm360Pending;
+        if (p) {
+          try { await cm360DeleteReport(p.profileId, p.reportId); cm360Out('Temporary report deleted from CM360.'); }
+          catch (e2) { cm360Out('Could not delete the temporary report: ' + e2.message + ' (it is removed on the next run).', true); }
+        }
+        STATE.cm360Pending = null;
+        if ($('#cm360-manual')) $('#cm360-manual').remove();
         break;
       }
       case 'ga4-run': await runGa4Audit(); break;
@@ -2098,6 +2115,35 @@ document.addEventListener('click', async e => {
 });
 
 $('#open-audit').addEventListener('click', () => $('#open-audit-file').click());
+function cm360Out(msg, isErr) {
+  const box = $('#cm360-log');
+  if (!box) return;
+  box.hidden = false;
+  box.insertAdjacentHTML('beforeend', '<div' + (isErr ? ' class="err"' : '') + '>' + esc(msg) + '</div>');
+  box.scrollTop = box.scrollHeight;
+}
+
+// CM360: the user adds the report CSV they downloaded; only counts and column names are shown
+document.addEventListener('change', async e => {
+  if (e.target.id !== 'cm360-file') return;
+  const f = e.target.files[0], p = STATE.cm360Pending;
+  if (!f) return;
+  try {
+    const rep = cm360ReadReportFile(await f.text());
+    cm360Out('✔ Read the downloaded report: ' + rep.rows.length + ' row(s), columns: ' + rep.columns.join(', ') + '. Contents not displayed or stored.');
+    if (p) {
+      try { await cm360DeleteReport(p.profileId, p.reportId); cm360Out('✔ Temporary report deleted from CM360.'); }
+      catch (e2) { cm360Out('Could not delete the temporary report: ' + e2.message + ' (it is removed on the next run).', true); }
+    }
+    cm360Out('Result: CM360 report data can be used with one manual download. The CM360 cross-check is feasible.');
+    STATE.cm360Pending = null;
+    if ($('#cm360-manual')) $('#cm360-manual').remove();
+  } catch (err) {
+    cm360Out('✖ ' + err.message, true);
+  }
+  e.target.value = '';
+});
+
 document.addEventListener('change', e => {
   if (!e.target.matches('[data-ga4-prop]')) return;
   const g = STATE.ga4, name = e.target.dataset.ga4Prop;
