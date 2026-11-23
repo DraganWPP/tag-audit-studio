@@ -64,7 +64,7 @@ before(async () => {
       res.end('ok');
     } else {
       const relative = route === '/' ? 'index.html' : route.slice(1);
-      if (!/^(index\.html|js\/[a-z-]+\.js|css\/(?:app|report)\.css)$/.test(relative)) {
+      if (!/^(index\.html|js\/[a-z0-9-]+\.js|css\/(?:app|report)\.css)$/.test(relative)) {
         res.writeHead(404); res.end(); return;
       }
       fs.readFile(path.join(root, ...relative.split('/'))).then(data => {

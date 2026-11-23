@@ -33,10 +33,13 @@ js/cm360.js         CM360 check (dfareporting scope, optional): profiles/configs
                     (Floodlight ↔ GTM name matching + analyst mapping, CM360 clicks vs GA4 sessions per campaign)
 js/ai.js            providers, AI_SYSTEM prompt, AI_TASKS (writeup, fixplan), aiExplainUnknownTags, aiAuditContext,
                     renderMarkdown (small, safe — escapes HTML first)
-js/app.js           STATE, views (audit, summary, consent, tags, ids, live, findings, ai, settings), runAudit()
+js/app.js           STATE, views (audit, overview, summary, consent, tags, ids, live, findings, ai, settings, ga4, cm360),
+                    runFullAudit() (GTM → GA4 → CM360 with STATE.auto run sheet; pauses for CM360 connect/downloads), runAudit()
                     pipeline, exports (PDF via window.print + #print-report, CSV, save/open audit JSON)
 css/app.css         design tokens, light/dark, print stylesheet
 ```
+
+**Run audit** calls `runFullAudit()`: it switches to the Overview, calls `runAudit({stay:true})` (which also runs the GA4 audit), then `autoCm360Step()`. CM360 pauses at `connect` (scope redirect; `STATE.auto` is stashed and the step resumes on return) or `waiting` (manual downloads + drop zone; `finishCm360` → `autoCm360Finished`). Combined client PDF = `combinedCoverHtml` + `clientReportHtml` for the GTM, GA4 and CM360 (`cm360ClientReportModel`) models.
 
 **`runAudit()` pipeline** (in `app.js`): the async fetch steps run first, then the synchronous engine.
 1. Read containers through the GTM API, and parse the IDs in any exports. These count as "full detail".

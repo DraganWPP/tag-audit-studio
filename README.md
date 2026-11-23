@@ -154,6 +154,20 @@ The key is stored in the browser's local storage and sent only to that provider.
 4. Click **Run audit**. Containers covered by the API or an export are not scanned publicly as well, so tags are not counted twice.
 5. Use **Summary → Export PDF report**. The PDF includes the AI client report and fix plan if you generated them.
 
+### One click: GTM → GA4 → CM360
+
+**Run audit** runs every check that applies, one after another, and shows progress on the **Overview** page:
+
+1. **GTM and consent audit** from the sources you added.
+2. **GA4 audit** (if *Also run the full GA4 audit* is ticked and you're signed in): finds the GA4 properties behind the live measurement IDs in GTM and audits them.
+3. **CM360 check** (if *Then run the CM360 check* is ticked and GTM has Floodlight tags): finds the CM360 account that owns the Floodlight configuration, runs the two reports, then **pauses for you**:
+   - if CM360 isn't connected yet, click **Connect CM360**; the run carries on by itself when you come back
+   - download the two reports with one click each, then drag both files from Chrome's download bubble (or Ctrl+J) onto the drop zone. Chrome doesn't let websites read the Downloads folder, so this one step stays manual.
+
+Steps that don't apply are marked *Skipped* with the reason (no GA4 ID, no Floodlight tags, not signed in, no CM360 account owns the configuration). If only the GTM audit applied, the run opens the Summary as before.
+
+The **Overview** shows each report's grade, the high and medium actions across all of them, and **Combined client PDF**: an overview page followed by the client report of each review (GTM and consent, each GA4 property, CM360).
+
 ## GA4 audit (separate report)
 
 **GA4 audit** in the left rail produces a separate report for one or more GA4 properties. It needs Google sign-in (the same read-only access) and works with or without a GTM audit.
@@ -186,7 +200,7 @@ The key is stored in the browser's local storage and sent only to that provider.
 **How it runs:**
 1. The app picks the CM360 account and Floodlight configuration that GTM's Floodlight tags send to. You can change both.
 2. It runs two temporary reports: Floodlight conversions per activity, and impressions and clicks per campaign for the advertiser.
-3. Google doesn't let browsers download report files directly. **Download** each report with one click (Google's own link, using your browser's Google sign-in), then **add both CSV files** back.
+3. Google doesn't let browsers download report files directly. **Download** each report with one click (Google's own link, using your browser's Google sign-in), then **drop both CSV files** onto the drop zone (or click it to choose them).
 4. The files are read in the browser. Only counts per activity and campaign are kept, and both reports are then deleted from CM360. Reports left behind, for example if the tab was closed, are deleted on the next run.
 
 **What it checks:**

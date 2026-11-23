@@ -360,6 +360,122 @@ function ga4ClientReportModel(ga4, pr) {
   };
 }
 
+// ── CM360 client report ─────────────────────────────────────────────
+
+const CM360_CLIENT_AREAS = {
+  'Floodlight setup': ['Advertising conversion setup', 'Media / ad operations',
+    'Some conversion tags send data to advertising accounts that are not yours or are no longer used.',
+    'Confirm who owns each conversion account and remove the tags that should no longer send data.',
+    'Check the tag manager after the change and confirm only the expected accounts receive data.'],
+  'Floodlight vs GTM': ['Advertising conversions', 'Media / analytics',
+    'Some advertising conversions are not recorded, or are recorded by tags outside the tag manager.',
+    'Fix or retire the conversion tags that record nothing, and document where the others are set up.',
+    'Complete a test conversion and confirm it appears in Campaign Manager.'],
+  'Delivery vs analytics': ['Campaign traffic', 'Media / analytics',
+    'Visits from some campaigns do not arrive in analytics as expected, so campaign reports undercount.',
+    'Check campaign tagging (UTM parameters), landing page redirects and consent on the affected campaigns.',
+    'Compare campaign clicks with analytics visits for the following week.']
+};
+
+const CM360_CLIENT_FINDING_COPY = [
+  [/none of your CM360 accounts can see/i, 'Remove conversion tags for unknown accounts',
+    'Conversion data is sent to advertising accounts the media team cannot see, possibly a previous agency or a test setup.',
+    'Confirm who owns those accounts and remove the tags that should no longer send data.'],
+  [/recorded no conversions/i, 'Fix conversion tags that record nothing',
+    'Some conversion tags are live but Campaign Manager recorded no conversions from them in the last 30 days.',
+    'Check the triggers of those tags, or retire the ones that are no longer used.'],
+  [/not matched to a CM360 activity/i, 'Confirm what each conversion tag measures',
+    'Some conversion tags could not be linked to a conversion in Campaign Manager.',
+    'Confirm the purpose of each tag with the media team and remove the ones without a use.'],
+  [/no tag in this GTM container/i, 'Document conversions tracked elsewhere',
+    'Some conversions are recorded by code outside the tag manager, which is harder to maintain and to control for consent.',
+    'Find where those conversions are tracked and move them into the tag manager if possible.'],
+  [/no GA4 sessions/i, 'Make campaign visits visible in analytics',
+    'Some campaigns receive clicks but no matching visits appear in analytics.',
+    'Check campaign tagging (UTM parameters) and landing page redirects for those campaigns.'],
+  [/under half as many sessions/i, 'Reduce lost campaign visits',
+    'Analytics records far fewer visits than Campaign Manager records clicks for some campaigns.',
+    'Check landing page speed, redirects, campaign tagging and consent for those campaigns.']
+];
+
+function cm360ClientReportModel(r, meta) {
+  if (!r || !Array.isArray(r.issues)) throw new Error('Run the CM360 check before exporting a CM360 report.');
+  meta = meta || {};
+  const counts = { High: 0, Medium: 0, Low: 0 };
+  const actions = r.issues.map((issue, index) => {
+    counts[issue.severity]++;
+    const area = CM360_CLIENT_AREAS[issue.area] || ['Advertising review', 'Media', 'An advertising setting needs review.',
+      'Review the flagged item with the media team.', 'Recheck after any changes.'];
+    const copy = CM360_CLIENT_FINDING_COPY.find(row => row[0].test(issue.finding));
+    return {
+      id: 'cm360-finding-' + (index + 1), area: issue.area, severity: issue.severity,
+      title: copy ? copy[1] : 'Review ' + area[0].toLowerCase(),
+      why: copy ? copy[2] : area[2], recommendation: copy ? copy[3] : area[3],
+      verify: area[4], team: area[1],
+      evidence: issue.area === 'Delivery vs analytics' ? 'Campaign Manager and analytics, last 30 days' : 'Campaign Manager and tag manager, last 30 days',
+      affected: Array.isArray(issue.items) ? issue.items.length : 0
+    };
+  });
+  const areaLabels = { 'Floodlight setup': 'Conversion accounts', 'Floodlight vs GTM': 'Conversion tags', 'Delivery vs analytics': 'Campaign traffic in analytics' };
+  const areaGroups = r.areas.map(a => {
+    const relevant = actions.filter(x => x.area === a.area);
+    const severity = relevant.length ? relevant[0].severity : null;
+    return {
+      label: areaLabels[a.area] || a.area, severity,
+      status: severity === 'High' ? 'High priority' : severity === 'Medium' ? 'Needs attention' : severity === 'Low' ? 'Maintenance'
+        : a.score === null ? 'Not checked' : 'No issues identified',
+      note: relevant.length ? relevant.length + ' recommendation' + (relevant.length === 1 ? '' : 's') + '.'
+        : a.score === null ? 'Needs the tag manager or analytics review for this site.' : 'Within the available checks.'
+    };
+  });
+  const score = r.score.score;
+  return {
+    client: meta.client || hostOf_(meta.site) || r.account || 'Campaign Manager review',
+    site: joinParts_(meta.site, r.account && 'Campaign Manager account: ' + r.account),
+    date: new Date(meta.date || Date.now()).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }),
+    score, grade: r.score.grade,
+    health: score >= 90 ? 'Strong advertising measurement' : score >= 75 ? 'Some improvements needed'
+      : score >= 60 ? 'Improvements needed' : 'Priority action needed',
+    counts, findingCount: r.issues.length, liveCount: 0, actions, areas: areaGroups,
+    coverage: [
+      'Campaign Manager conversions and campaign delivery from the last 30 days reviewed.',
+      r.summary.gtmTags ? 'Compared with the conversion tags in the tag manager.' : 'Not compared with the tag manager setup.',
+      r.ga4Source ? 'Campaign clicks compared with analytics visits.' : 'Campaign clicks not compared with analytics.'
+    ],
+    first: actions.length ? actions[0].title : 'Keep the current setup under review.',
+    caveat: 'Score reflects how Campaign Manager, the tag manager and analytics agree, not legal compliance or guaranteed data accuracy.',
+    limits: 'Tags are linked to Campaign Manager conversions by name and confirmed by the analyst. Search campaigns are not compared with analytics.',
+    noActions: 'No recommendations from the available checks. Review the coverage notes before drawing conclusions.',
+    heading: 'Campaign Manager 360 review', title: 'Your advertising measurement.', footerLabel: 'CM360 client report',
+    priorityNote: 'Campaign-level detail is in the technical report.'
+  };
+}
+
+/**
+ * Cover page for the combined client report.
+ *  reports: [{ label, model }] in report order; notChecked: [text] for reports that were not run.
+ */
+function combinedCoverHtml(reports, meta, notChecked) {
+  const header = `<header class="cr-header"><b>Tag Audit Studio</b><span>Measurement review</span></header>`;
+  const all = [].concat(...reports.map(x => x.model.actions.map(a => Object.assign({ report: x.label }, a))))
+    .sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
+  const counts = { High: 0, Medium: 0, Low: 0 };
+  all.forEach(a => { counts[a.severity]++; });
+  return `<article class="client-report-page cr-dashboard cr-cover">${header}
+    <div class="cr-heading"><div><h1>Your measurement review.</h1><p>${esc(meta.client)}</p><small>${esc(meta.site)}</small></div><span>${esc(meta.date)}</span></div>
+    <section class="cr-stats">${[['Recommendations', all.length, 'Info'], ['High priority', counts.High, 'High'], ['Medium priority', counts.Medium, 'Medium'], ['Low priority', counts.Low, 'Low']]
+      .map(([label, value, s]) => `<div class="${s !== 'Info' && value ? 'cr-stat-' + s : ''}"><b>${value}</b><span>${label}</span></div>`).join('')}</section>
+    <section class="cr-panel"><h2>What was reviewed</h2>${reports.map(x => `<div class="cr-area"><div><strong>${esc(x.label)}</strong>${x.model.score === null
+      ? clientBadge('Info', 'No score') : clientBadge(clientScoreTraffic(x.model.score), 'Grade ' + x.model.grade + ' · ' + x.model.score + ' / 100')}</div>
+      <p>${esc(x.model.health)}. ${x.model.findingCount} recommendation${x.model.findingCount === 1 ? '' : 's'}.</p></div>`).join('')}
+      ${notChecked.map(t => `<div class="cr-area"><div><strong>${esc(t[0])}</strong>${clientBadge('Info', 'Not reviewed')}</div><p>${esc(t[1])}</p></div>`).join('')}</section>
+    <h2 class="cr-section-title">Recommended first</h2><section class="cr-panel cr-actions">${all.length
+      ? all.slice(0, 3).map((a, i) => clientActionRow(Object.assign({}, a, { evidence: a.report + ' · ' + a.evidence }), i + 1)).join('')
+      : '<p>No recommendations from the available checks.</p>'}</section>
+    <aside class="cr-coverage"><h3>How to read this report</h3><p>Each review follows with its own summary and action plan. Scores reflect configuration and data checks, not legal compliance or guaranteed data accuracy.</p></aside>
+    <footer class="cr-footer"><span>${esc(meta.client)} · ${esc(meta.date)}</span><span>Measurement review · overview</span></footer></article>`;
+}
+
 function clientBadge(severity, label) {
   return `<span class="cr-badge cr-${severity || 'Info'}">${esc(label || severity + ' priority')}</span>`;
 }
