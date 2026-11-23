@@ -230,6 +230,136 @@ function clientReportModel(result) {
   };
 }
 
+// ── GA4 client report ───────────────────────────────────────────────
+
+const GA4_CLIENT_AREAS = {
+  'Collection & streams': ['Data collection', 'Analytics / website',
+    'Analytics data may be missing, split or include traffic that is not from the website.',
+    'Review where the analytics data comes from and remove or fix the sources that should not send data.',
+    'Check the following week of data for the affected sites and streams.'],
+  'Events & key events': ['Events & conversions', 'Analytics',
+    'Some conversions or events may not be measured as intended.',
+    'Review the affected events and conversions with the analytics team and fix or retire them.',
+    'Complete a test journey and confirm each conversion appears once in reports.'],
+  'Custom definitions': ['Reporting fields', 'Analytics',
+    'Some reporting fields are unused or not set up, so details are missing from reports.',
+    'Register the fields that reports need and archive the ones that are no longer used.',
+    'Check the fields fill with data in reports after the change.'],
+  'Data quality': ['Data quality', 'Analytics / media',
+    'Some reports may attribute traffic or sales incorrectly.',
+    'Fix the tagging or settings behind the affected reports.',
+    'Compare the affected reports before and after the change.'],
+  'Privacy & retention': ['Privacy & data retention', 'Analytics, with privacy input',
+    'Some analytics settings may not match privacy requirements or reporting needs.',
+    'Review the affected privacy and retention settings with the privacy owner.',
+    'Recheck the settings and the affected reports after the change.'],
+  'Integrations': ['Connected products', 'Media / analytics',
+    'Analytics is not connected to all the advertising tools in use.',
+    'Connect the products the media team relies on, so conversions and audiences can be shared.',
+    'Confirm conversions and audiences appear in the connected product.'],
+  'Attribution & reporting': ['Attribution & reporting', 'Analytics',
+    'Reporting settings may affect how credit is given to marketing channels.',
+    'Review the attribution and reporting settings with the media team.',
+    'Agree the settings and document them.'],
+  'GTM alignment': ['Tag manager alignment', 'Analytics',
+    'The tag manager and analytics do not fully agree on what is measured.',
+    'Align the tag manager setup with the events analytics should receive, and remove duplicates.',
+    'Use a test visit to confirm each event arrives once.']
+};
+
+const GA4_CLIENT_FINDING_COPY = [
+  [/personal data in page URLs/i, 'Stop personal data reaching analytics',
+    'Page addresses recorded in analytics appear to contain personal details. Google does not allow this.',
+    'Change the affected forms or pages so personal details are not added to page addresses, and turn on redaction.'],
+  [/No data received/i, 'Restore analytics data collection',
+    'The analytics property has not received data in the last 28 days.',
+    'Confirm the analytics tag is installed and allowed to run on the site.'],
+  [/key event\(s\) received no data/i, 'Fix conversions that are no longer recorded',
+    'Some conversions are set up but have not been recorded in the last 28 days.',
+    'Check those conversions still fire, or retire the ones that are no longer used.'],
+  [/No key events/i, 'Set up conversions',
+    'No conversions are set up, so analytics cannot report on business outcomes.',
+    'Agree the key business actions and mark them as conversions.'],
+  [/sent by both GTM and enhanced measurement/i, 'Remove double-counted events',
+    'Some events are sent twice, which inflates the numbers in reports.',
+    'Keep one source for each of the affected events.'],
+  [/tagged in GTM but not received/i, 'Fix events that are set up but not arriving',
+    'Some events are set up in the tag manager but analytics does not receive them.',
+    'Check the triggers and the destination for each affected event, and remove unused ones.'],
+  [/Unassigned channel/i, 'Improve campaign tagging',
+    'A share of visits cannot be attributed to a marketing channel.',
+    'Review the campaign tagging (UTM parameters) used by the media teams.'],
+  [/transaction ID|recorded more than once|no revenue/i, 'Make purchase data reliable',
+    'Some purchases are missing details or counted more than once, which affects revenue reports.',
+    'Send a unique transaction ID, value and currency with every purchase, once.'],
+  [/retention is only 2 months/i, 'Keep analytics data for longer',
+    'Detailed analysis is limited to the last two months.',
+    'Increase data retention to 14 months if the privacy policy allows.'],
+  [/unexpected hostname/i, 'Remove data from other sites',
+    'Analytics receives data from sites other than the client\'s, such as test or copied sites.',
+    'Identify those sources and exclude them.']
+];
+
+function ga4ClientReportModel(ga4, pr) {
+  if (!ga4 || !pr || !Array.isArray(pr.issues)) throw new Error('Run a GA4 audit before exporting a GA4 report.');
+  const counts = { High: 0, Medium: 0, Low: 0 };
+  const actions = pr.issues.map((issue, index) => {
+    counts[issue.severity]++;
+    const area = GA4_CLIENT_AREAS[issue.area] || ['Analytics review', 'Analytics', 'An analytics setting needs review.',
+      'Review the flagged item with the analytics team.', 'Recheck after any changes.'];
+    const copy = GA4_CLIENT_FINDING_COPY.find(row => row[0].test(issue.finding));
+    return {
+      id: 'ga4-finding-' + (index + 1), area: issue.area, severity: issue.severity,
+      title: copy ? copy[1] : 'Review ' + area[0].toLowerCase(),
+      why: copy ? copy[2] : area[2], recommendation: copy ? copy[3] : area[3],
+      verify: area[4], team: area[1], evidence: issue.area === 'GTM alignment' ? 'Tag manager and analytics comparison'
+        : /Data quality|Collection|Events/.test(issue.area) && pr.hasData ? 'Analytics data, last 28 days' : 'Analytics settings',
+      affected: Array.isArray(issue.items) ? issue.items.length : 0
+    };
+  });
+  const partial = pr.coverage.unavailable.length > 0;
+  const areaGroups = [
+    ['Data collection', ['Collection & streams']],
+    ['Events & conversions', ['Events & key events', 'GTM alignment']],
+    ['Data quality & reporting', ['Data quality', 'Custom definitions', 'Attribution & reporting']],
+    ['Privacy & retention', ['Privacy & retention']],
+    ['Connected products', ['Integrations']]
+  ].map(([label, names]) => {
+    const relevant = actions.filter(a => names.includes(a.area));
+    const notChecked = names.every(n => (pr.areas.find(a => a.area === n) || {}).score === null);
+    const severity = relevant.length ? relevant[0].severity : null;
+    return {
+      label, severity,
+      status: severity === 'High' ? 'High priority' : severity === 'Medium' ? 'Needs attention' : severity === 'Low' ? 'Maintenance'
+        : notChecked ? 'Not checked' : partial ? 'Partly checked' : 'No issues identified',
+      note: relevant.length ? relevant.length + ' recommendation' + (relevant.length === 1 ? '' : 's') + '.'
+        : notChecked ? 'Needs more data to assess.' : 'Within the available checks.'
+    };
+  });
+  const score = pr.score.score;
+  return {
+    client: ga4.client || hostOf_(ga4.site) || pr.displayName,
+    site: joinParts_(ga4.site, 'GA4 property: ' + pr.displayName),
+    date: new Date(pr.meta.date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }),
+    score, grade: pr.score.grade,
+    health: score >= 90 ? 'Strong analytics health' : score >= 75 ? 'Some improvements needed'
+      : score >= 60 ? 'Improvements needed' : 'Priority action needed',
+    counts, findingCount: pr.issues.length, liveCount: 0, actions, areas: areaGroups,
+    coverage: [
+      'Analytics settings reviewed.',
+      pr.hasData ? 'Collected analytics data from the last 28 days reviewed.' : 'Collected analytics data not available.',
+      pr.gtmSource ? 'Compared with the tag manager setup.' : 'Not compared with the tag manager setup.',
+      partial ? 'Some settings could not be read; see the technical report.' : ''
+    ].filter(Boolean),
+    first: actions.length ? actions[0].title : 'Keep the current setup under review.',
+    caveat: 'Score reflects analytics configuration and data checks, not legal compliance or guaranteed data accuracy.',
+    limits: 'Some settings (internal traffic, unwanted referrals, cross-domain, user access) are not readable with read-only access and need a manual check.',
+    noActions: 'No recommendations from the available checks. Review the coverage notes before drawing conclusions.',
+    heading: 'Google Analytics 4 review', title: 'Your analytics health.', footerLabel: 'GA4 client report',
+    priorityNote: (pr.coverage.manual || []).length + ' settings to check manually are listed in the technical report.'
+  };
+}
+
 function clientBadge(severity, label) {
   return `<span class="cr-badge cr-${severity || 'Info'}">${esc(label || severity + ' priority')}</span>`;
 }
@@ -245,7 +375,7 @@ function clientReportHtml(model) {
   for (let i = 0; i < model.actions.length; i += 3) detailPages.push(model.actions.slice(i, i + 3));
   const total = 1 + detailPages.length;
   const header = heading => `<header class="cr-header"><b>Tag Audit Studio</b><span>${esc(heading)}</span></header>`;
-  const footer = page => `<footer class="cr-footer"><span>${esc(model.client)} · ${esc(model.date)}</span><span>Client report · ${page} / ${total}</span></footer>`;
+  const footer = page => `<footer class="cr-footer"><span>${esc(model.client)} · ${esc(model.date)}</span><span>${esc(model.footerLabel || 'Client report')} · ${page} / ${total}</span></footer>`;
   const stats = [['Audit findings', model.findingCount, 'Info'], ['High priority', model.counts.High, 'High'],
     ['Medium priority', model.counts.Medium, 'Medium'], ['Low priority', model.counts.Low, 'Low']];
   const gauge = model.score === null ? '<div class="cr-gauge cr-no-score"><b>—</b><small>No score available</small></div>'
@@ -253,8 +383,8 @@ function clientReportHtml(model) {
       <svg viewBox="0 0 180 180" aria-hidden="true"><circle cx="90" cy="90" r="73" class="cr-track"/>
       <circle cx="90" cy="90" r="73" pathLength="100" class="cr-progress" stroke-dasharray="${model.score} 100"/></svg>
       <div><b>${model.score}</b><small>out of 100</small></div></div><span class="cr-grade cr-${clientScoreTraffic(model.score)}">Health grade ${esc(model.grade)}</span>`;
-  return `<article class="client-report-page cr-dashboard">${header('Website measurement & consent review')}
-    <div class="cr-heading"><div><h1>Your measurement health.</h1><p>${esc(model.client)}</p><small>${esc(model.site)}</small></div><span>${esc(model.date)}</span></div>
+  return `<article class="client-report-page cr-dashboard">${header(model.heading || 'Website measurement & consent review')}
+    <div class="cr-heading"><div><h1>${esc(model.title || 'Your measurement health.')}</h1><p>${esc(model.client)}</p><small>${esc(model.site)}</small></div><span>${esc(model.date)}</span></div>
     <section class="cr-stats">${stats.map(([label, value, severity]) =>
       `<div class="${severity !== 'Info' && value ? 'cr-stat-' + severity : ''}"><b>${value}</b><span>${label}</span></div>`).join('')}</section>
     <div class="cr-overview">
@@ -267,7 +397,8 @@ function clientReportHtml(model) {
         `<span class="cr-${s}" style="flex:${model.counts[s]}"></span>`).join('')}</div>
         <p>High ${model.counts.High} · Medium ${model.counts.Medium} · Low ${model.counts.Low}</p>`
       : '<p>No configuration findings recorded.</p>'}
-      <small>${model.liveCount ? model.liveCount + ' additional live-consent recommendation(s).' : 'No additional live-consent recommendations.'}</small></div>
+      <small>${model.priorityNote !== undefined ? esc(model.priorityNote)
+        : model.liveCount ? model.liveCount + ' additional live-consent recommendation(s).' : 'No additional live-consent recommendations.'}</small></div>
       <div><h2>Recommended first</h2><h3>${esc(model.first)}</h3><p>${model.actions.length ? 'See the action plan for recommendations and follow-up checks.' : esc(model.noActions)}</p></div></section>
     <h2 class="cr-section-title">Your next steps</h2><section class="cr-panel cr-actions">${model.actions.length
       ? model.actions.slice(0, 2).map((action, i) => clientActionRow(action, i + 1)).join('')

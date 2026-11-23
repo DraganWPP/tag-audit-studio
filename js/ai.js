@@ -132,6 +132,11 @@ function aiAuditContext(result, maxChars) {
     liveConsentTest: result.live ? result.live.verdicts.map(v => ({ vendor: v.vendor, purpose: v.purpose,
       beforeChoice: v.cells.before, afterDeny: v.cells.deny, afterAccept: v.cells.accept, verdict: v.verdict })) : 'not run',
     ga4Property: (result.rows || []).filter(r => r[0] === '📈 GA4 Property').map(r => ({ property: r[1], id: r[2], info: r[3] })),
+    ga4Audit: typeof STATE !== 'undefined' && STATE.ga4 && STATE.ga4.result ? STATE.ga4.result.properties.map(p => ({
+      property: p.displayName, measurementIds: p.summary.measurementIds, score: p.score, events28d: p.summary.events28d,
+      issues: p.issues.slice(0, 30).map(i => ({ severity: i.severity, area: i.area, finding: i.finding, items: (i.items || []).slice(0, 10) })),
+      eventMismatches: p.crossRef.filter(x => x.sev === 'Medium').slice(0, 30).map(x => ({ event: x.name, status: x.status, count: x.count }))
+    })) : 'not run',
     clientSettings: result.meta.settings
   };
   let json = JSON.stringify(ctx);

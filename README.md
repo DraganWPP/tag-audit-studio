@@ -127,7 +127,7 @@ The key is stored in the browser's local storage and sent only to that provider.
 ### Google sign-in (optional, needed for the GTM API and GA4 property checks)
 
 1. In [Google Cloud Console](https://console.cloud.google.com), create or choose a project.
-2. Under **APIs & Services → Library**, enable the **Tag Manager API** and the **Google Analytics Admin API**.
+2. Under **APIs & Services → Library**, enable the **Tag Manager API**, the **Google Analytics Admin API** and the **Google Analytics Data API** (the Data API is used by the GA4 audit).
 3. Under **APIs & Services → OAuth consent screen**, choose **Internal** (only people in your Google Workspace can sign in), then add the scopes `…/auth/tagmanager.readonly` and `…/auth/analytics.readonly`.
 4. Under **APIs & Services → Credentials → Create credentials → OAuth client ID**, choose **Web application** and add:
    - **Authorised JavaScript origins** (for the sign-in popup):
@@ -152,6 +152,23 @@ The key is stored in the browser's local storage and sent only to that provider.
 3. Optionally open **Client rules** to set the client's own CMP category IDs, whether analytics needs consent, their naming pattern, and approved vendors.
 4. Click **Run audit**. Containers covered by the API or an export are not scanned publicly as well, so tags are not counted twice.
 5. Use **Summary → Export PDF report**. The PDF includes the AI client report and fix plan if you generated them.
+
+## GA4 audit (separate report)
+
+**GA4 audit** in the left rail produces a separate report for one or more GA4 properties. It needs Google sign-in (the same read-only access) and works with or without a GTM audit.
+
+- **Start it** from the GA4 audit page (pick any property your account can see), or tick **Also run the full GA4 audit** on New audit to run it for the GA4 IDs the GTM audit finds.
+- **What it reads:**
+  - every setting the GA4 Admin API exposes read-only: streams, enhanced measurement, redaction, retention, key events, custom definitions, links, attribution, Google signals, event rules, audiences, channel groups
+  - the last 28 days of collected data from the Data API: events, streams, hostnames, channels, sources, purchases, custom dimension fill rates
+  - **page URLs that look like they contain personal data are masked in the browser before anything is stored**
+- **GTM cross-reference:** when the GTM audit in the same session sends data to the property, the report compares GTM's GA4 event tags with the events GA4 actually received. It flags events tagged but never received, events double-counted with enhanced measurement, and key events that GTM doesn't send.
+- **Report:**
+  - its own grade and areas (Collection & streams, Events & key events, Custom definitions, Data quality, Privacy & retention, Integrations, Attribution & reporting, GTM alignment)
+  - tabs for events, configuration, data quality and coverage
+  - a GA4 client PDF, a technical PDF and CSVs
+  - **Save audit** includes the GA4 report
+- **Not readable with read-only access, so listed as manual checks:** internal traffic and data filters, unwanted referrals, cross-domain domains, session timeout, user access and change history. Some settings come from Google's alpha Admin API and can be unavailable for some properties; the Coverage tab lists anything that couldn't be read.
 
 ### Optional local browser runner
 

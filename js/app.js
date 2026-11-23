@@ -23,7 +23,8 @@ function saveDraft() {
   const i = STATE.inputs;
   try {
     localStorage.setItem(DRAFT_KEY, JSON.stringify({
-      client: i.client, site: i.site, publicIds: i.publicIds, apiIds: i.apiIds, apiTarget: i.apiTarget, ga4: i.ga4, rules: i.rules
+      client: i.client, site: i.site, publicIds: i.publicIds, apiIds: i.apiIds, apiTarget: i.apiTarget, ga4: i.ga4,
+      ga4Full: i.ga4Full, rules: i.rules
     }));
   } catch (e) { /* ignore */ }
 }
@@ -35,13 +36,16 @@ function loadDraft() {
 
 const STATE = {
   view: 'audit',
-  inputs: Object.assign({ client: '', site: '', publicIds: '', apiIds: '', apiTarget: 'live', ga4: true, rules: {},
+  inputs: Object.assign({ client: '', site: '', publicIds: '', apiIds: '', apiTarget: 'live', ga4: true, ga4Full: true, rules: {},
                           exports: [], pageSource: '', live: null }, loadDraft() || {}),
   result: null,
   ai: { writeup: '', fixplan: '', chat: [], busy: '' },
   overrides: {},
-  caches: { containers: {}, api: {}, ga4: {}, gtag: {} },
+  caches: { containers: {}, api: {}, ga4: {}, gtag: {}, ga4full: {} },
   running: false,
+  // Separate GA4 audit: picker state, result ({ date, client, site, properties: [...] }) and view state
+  ga4: { props: null, loading: false, known: {}, selected: [], query: '', result: null, picking: false,
+         index: 0, tab: 'overview', running: false, log: [] },
   consentFilter: 'All',
   tagSection: 'tags',
   workspaceOptions: [],
@@ -93,7 +97,7 @@ function sevClass(s) { return esc(s === '—' ? 'Paused' : s); }
 
 const VIEWS = {
   audit: renderAudit, summary: renderSummary, consent: renderConsent, tags: renderTags, ids: renderIds,
-  live: renderLive, findings: renderFindings, ai: renderAI, settings: renderSettings
+  live: renderLive, findings: renderFindings, ai: renderAI, settings: renderSettings, ga4: renderGa4
 };
 
 function setView(view) {
@@ -112,14 +116,18 @@ function setView(view) {
 function updateNav() {
   const r = STATE.result;
   $$('#nav-results .nav-item').forEach(b => { b.disabled = !r; });
-  if (!r) return;
-  const high = r.issues.filter(i => i.severity === 'High').length;
-  const consentHigh = r.audit.tags.filter(t => !t.paused && t.risk === 'High').length;
   const setCount = (view, n, alert) => {
     const b = $('#nav [data-view="' + view + '"]');
+    if (!b) return;
     const label = b.textContent.replace(/\d+$/, '').trim();
     b.innerHTML = esc(label) + (n ? ' <span class="count' + (alert ? ' alert' : '') + '">' + n + '</span>' : '');
   };
+  const g4 = STATE.ga4.result;
+  const g4High = g4 ? g4.properties.reduce((s, p) => s + p.issues.filter(i => i.severity === 'High').length, 0) : 0;
+  setCount('ga4', g4High, g4High > 0);
+  if (!r) return;
+  const high = r.issues.filter(i => i.severity === 'High').length;
+  const consentHigh = r.audit.tags.filter(t => !t.paused && t.risk === 'High').length;
   setCount('summary', high, high > 0);
   setCount('consent', consentHigh, consentHigh > 0);
   setCount('tags', r.audit.tags.length, false);
@@ -327,6 +335,16 @@ async function runAudit(opts) {
     const rows = dedupe_(findings.concat(runAuditChecks_()));
     STATE.result = buildResult(rows, sources);
     log('Done: ' + STATE.result.issues.length + ' issues, health score ' + STATE.result.score.score + '/100.');
+
+    // Separate GA4 audit for the GA4 properties behind the live measurement IDs
+    if (i.ga4Full && Google.isSignedIn() && liveMids.length && (i.rules.ga4Checks || 'Auto') !== 'No') {
+      const found = await ga4PropertiesForIds(liveMids, log);
+      if (found.length) {
+        found.forEach(p => { STATE.ga4.known[p.property] = p; });
+        STATE.ga4.selected = Array.from(new Set(found.map(p => p.property)));
+        await runGa4Audit({ stay: true, refresh: !!opts.refresh });
+      }
+    }
     saveDraft();
     updateNav();
     if (!opts.stay) setView('summary'); else VIEWS[STATE.view]();
@@ -377,7 +395,10 @@ function buildResult(rows, sources) {
       tags: tags, triggers: AUDIT.triggers, variables: AUDIT.variables,
       ids: AUDIT.ids, consentMode: AUDIT.consentMode, fullDetail: AUDIT.fullDetail,
       pageScanned: AUDIT.pageScanned, ga4PropertyChecked: AUDIT.ga4PropertyChecked, liveTest: AUDIT.liveTest,
-      issues: issues
+      issues: issues,
+      // For the GA4 report's GTM cross-reference
+      ga4Events: AUDIT.ga4Events, googleTags: AUDIT.googleTags, pageGoogleConfigs: AUDIT.pageGoogleConfigs,
+      userProps: Array.from(AUDIT.userProps), gtagSettings: AUDIT.gtagSettings
     }
   };
 }
@@ -436,6 +457,7 @@ function renderAudit() {
           </div>
           <p class="hint">A workspace includes changes that are not live yet. Use it to review work in progress before it's published.</p>
           <label style="margin-top:10px;font-weight:400"><input type="checkbox" id="in-ga4" ${i.ga4 ? 'checked' : ''}> Check the GA4 properties behind the measurement IDs found</label>
+          <label style="margin-top:6px;font-weight:400"><input type="checkbox" id="in-ga4full" ${i.ga4Full ? 'checked' : ''}> Also run the full GA4 audit for them (separate GA4 report, includes the last 28 days of data)</label>
         </div>
       </div>
 
@@ -494,7 +516,7 @@ function renderAudit() {
     el.addEventListener(prop === 'checked' ? 'change' : 'input', () => { STATE.inputs[key] = el[prop || 'value']; saveDraft(); });
   };
   bind('in-client', 'client'); bind('in-site', 'site'); bind('in-public', 'publicIds');
-  bind('in-api', 'apiIds'); bind('in-ga4', 'ga4', 'checked'); bind('in-page', 'pageSource'); bind('in-target', 'apiTarget');
+  bind('in-api', 'apiIds'); bind('in-ga4', 'ga4', 'checked'); bind('in-ga4full', 'ga4Full', 'checked'); bind('in-page', 'pageSource'); bind('in-target', 'apiTarget');
   $$('[data-rule]').forEach(el => el.addEventListener('input', () => { STATE.inputs.rules[el.dataset.rule] = el.value; saveDraft(); }));
 
   $('#in-export').addEventListener('change', async e => {
@@ -584,6 +606,7 @@ function tagIndexForRow(g, row, index) {
 }
 
 function issueTagReferences(issue) {
+  if (!STATE.result) return '';
   const tags = STATE.result.audit.tags.filter(t => (issue.items || []).some(item =>
     item === t.label || String(item).indexOf(t.label + ':') === 0) ||
     issue.where === t.where || String(issue.where).indexOf(t.where + ' · ') === 0);
@@ -1428,6 +1451,270 @@ function applyTheme() {
 }
 
 // ══════════════════════════════════════════════════════════════════
+//  VIEW: GA4 AUDIT (separate report, cross-referenced with GTM)
+// ══════════════════════════════════════════════════════════════════
+
+const GA4_TABS = [['overview', 'Overview'], ['events', 'Events & GTM'], ['config', 'Configuration'],
+                  ['quality', 'Data quality'], ['coverage', 'Coverage']];
+
+function ga4Log(msg, isError) {
+  const g = STATE.ga4;
+  g.log.push({ msg: msg, err: !!isError });
+  const el = $('#ga4-log');
+  if (el) {
+    el.hidden = false;
+    el.insertAdjacentHTML('beforeend', '<div' + (isError ? ' class="err"' : '') + '>' + esc(msg) + '</div>');
+    el.scrollTop = el.scrollHeight;
+  } else if (STATE.view === 'audit') {
+    log(msg, isError);
+  }
+}
+
+/** GA4 properties behind measurement IDs (uses the cached stream lookup when it can). */
+async function ga4PropertiesForIds(mids, progress) {
+  const out = [];
+  for (const mid of mids) {
+    try {
+      const lookup = await findGa4Property(mid, progress, { client: STATE.inputs.client, site: STATE.inputs.site });
+      if (lookup.property) {
+        out.push({ property: lookup.property.property, displayName: lookup.property.displayName,
+                   account: lookup.property.account, mid: mid });
+      } else if (progress) progress(mid + ': no GA4 property found for the GA4 audit');
+    } catch (e) {
+      if (progress) progress(mid + ': ' + e.message, true);
+    }
+  }
+  return out;
+}
+
+/** GA4 IDs live in the current GTM audit, with their property if the lookup cache already knows it. */
+function ga4IdsFromGtm() {
+  const r = STATE.result;
+  if (!r) return [];
+  const cache = readJsonStore_(GA4_STREAM_CACHE_KEY);
+  return Object.keys(r.audit.ids).map(k => r.audit.ids[k]).filter(x => x.platform === 'GA4' && x.live && /^G-/.test(x.id))
+    .map(x => ({ mid: x.id, prop: cache[x.id] || null }));
+}
+
+async function loadGa4Properties() {
+  const g = STATE.ga4;
+  if (g.loading) return;
+  g.loading = true;
+  try {
+    g.props = await listGa4Properties();
+    // Tick the properties found by the GTM audit (cached lookups only; no extra API calls)
+    if (!g.selected.length) {
+      ga4IdsFromGtm().forEach(x => { if (x.prop && g.selected.indexOf(x.prop.property) < 0) g.selected.push(x.prop.property); });
+    }
+  } catch (e) {
+    toast('Could not list GA4 properties: ' + e.message, true);
+  } finally {
+    g.loading = false;
+    if (STATE.view === 'ga4') renderGa4();
+  }
+}
+
+async function runGa4Audit(opts) {
+  opts = opts || {};
+  const g = STATE.ga4;
+  if (g.running) return;
+  if (!Google.isSignedIn()) { toast('Sign in with Google first.', true); return; }
+  if (!g.selected.length) { toast('Choose at least one GA4 property.', true); return; }
+  g.running = true;
+  g.log = [];
+  const btn = $('#ga4-run-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Running GA4 audit…'; }
+  try {
+    const gtm = ga4GtmContext(STATE.result);
+    const meta = { client: STATE.inputs.client, site: STATE.inputs.site, date: new Date().toISOString() };
+    const properties = [];
+    for (const name of g.selected) {
+      const info = (g.props || []).find(p => p.property === name) || g.known[name] || { property: name, displayName: name };
+      if (!STATE.caches.ga4full[name] || opts.refresh) STATE.caches.ga4full[name] = await fetchGa4Full(info, ga4Log);
+      const res = buildGa4Result(STATE.caches.ga4full[name], gtm, meta);
+      properties.push(res);
+      ga4Log('GA4 audit of "' + res.displayName + '": grade ' + res.score.grade + ' (' + res.score.score + '/100), ' + res.issues.length + ' issue(s)' +
+             (res.coverage.unavailable.length ? ', ' + res.coverage.unavailable.length + ' setting(s) not readable' : ''));
+    }
+    g.result = { date: meta.date, client: meta.client, site: meta.site, properties: properties };
+    g.index = 0; g.tab = 'overview'; g.picking = false;
+    updateNav();
+    if (!opts.stay) setView('ga4');
+    else if (STATE.view === 'ga4') renderGa4();
+  } catch (e) {
+    console.error(e);
+    ga4Log('GA4 audit failed: ' + e.message, true);
+    toast('GA4 audit failed: ' + e.message, true);
+  } finally {
+    g.running = false;
+    const b = $('#ga4-run-btn');
+    if (b) { b.disabled = false; b.textContent = 'Run GA4 audit'; }
+  }
+}
+
+function ga4Current() {
+  const r = STATE.ga4.result;
+  return r ? r.properties[STATE.ga4.index] || r.properties[0] : null;
+}
+
+function renderGa4() {
+  const g = STATE.ga4;
+  if (!g.result || g.picking) return renderGa4Start();
+  const pr = ga4Current();
+  $('#view').innerHTML = ga4ReportHeader(pr) + `
+    ${g.result.properties.length > 1 ? `<div class="toolbar"><div class="seg" role="group" aria-label="GA4 property">${g.result.properties.map((p, n) =>
+      `<button data-act="ga4-prop" data-index="${n}" aria-pressed="${n === g.index}">${esc(p.displayName)}</button>`).join('')}</div></div>` : ''}
+    <div class="actions">
+      <button class="btn" data-act="ga4-pdf">Client PDF report</button>
+      <button class="btn secondary" data-act="ga4-pdf-technical">Technical PDF report</button>
+      <button class="btn secondary" data-act="ga4-csv-actions">Download actions (CSV)</button>
+      <button class="btn secondary" data-act="ga4-csv-events">Download events (CSV)</button>
+      <button class="btn secondary" data-act="save">Save audit</button>
+      <button class="btn secondary" data-act="ga4-rerun">Re-run GA4 audit</button>
+      <button class="btn secondary" data-act="ga4-new">Choose properties</button>
+    </div>
+    <div class="toolbar"><div class="seg" role="group" aria-label="GA4 report section">${GA4_TABS.map(t =>
+      `<button data-act="ga4-tab" data-tab="${t[0]}" aria-pressed="${g.tab === t[0]}">${t[1]}</button>`).join('')}</div></div>
+    <div id="ga4-tab">${ga4TabHtml(pr, g.tab)}</div>`;
+}
+
+function ga4ReportHeader(pr) {
+  const g = STATE.ga4.result;
+  const counts = s => pr.issues.filter(x => x.severity === s).length;
+  const num = n => n === null || n === undefined ? '—' : ga4Num_(n);
+  return `
+    <div class="report-head">
+      <div>
+        <h1>${esc(pr.displayName)}</h1>
+        <p class="meta">${esc(joinParts_(g.client, g.site, 'Property ' + String(pr.property).replace('properties/', ''), pr.account && 'Account: ' + pr.account))}</p>
+        <p class="meta">GA4 audit ${esc(new Date(pr.meta.date).toLocaleString())} · settings from the GA4 Admin API${pr.hasData ? ', collected data from the last 28 days (Data API)' : '; collected data not available'}</p>
+        <p class="meta">${pr.gtmSource ? 'Cross-checked against GTM: ' + esc(pr.gtmSource) : 'Not cross-checked against GTM. Run a GTM audit for this site first to compare tags with the data GA4 receives.'}</p>
+        <div class="tally">
+          <div><strong>${counts('High')}</strong>high priority</div>
+          <div><strong>${counts('Medium')}</strong>medium</div>
+          <div><strong>${counts('Low')}</strong>low</div>
+          <div><strong>${num(pr.summary.events28d)}</strong>events, 28 days</div>
+          <div><strong>${num(pr.summary.keyEvents)}</strong>key events</div>
+          <div><strong>${pr.summary.streams}</strong>data streams</div>
+        </div>
+      </div>
+      <div class="stamp ${esc(pr.score.grade)}" role="img" aria-label="GA4 health grade ${esc(pr.score.grade)}, score ${pr.score.score} out of 100">
+        <div><b>${esc(pr.score.grade)}</b><span>${pr.score.score} / 100</span></div>
+      </div>
+    </div>`;
+}
+
+function ga4KvTable(section) {
+  return `<h3>${esc(section.title)}</h3><div class="table-wrap"><table class="kv"><tbody>${section.rows.map(r =>
+    `<tr><th scope="row">${esc(r[0])}</th><td class="wrap">${esc(r[1])}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function ga4DataTable(section) {
+  return `<h3>${esc(section.title)}</h3>${section.rows.length ? `<div class="table-wrap"><table>
+    <thead><tr>${section.columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+    <tbody>${section.rows.map(r => `<tr>${r.map((c, n) => `<td${n === 0 ? ' class="wrap"' : ''}>${n === 0 && /URL/.test(section.title) ? '<code>' + esc(c) + '</code>' : esc(c)}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div>` : '<p class="hint">No data.</p>'}`;
+}
+
+function ga4EventsTable(pr) {
+  if (!pr.crossRef.length) return '<div class="empty">No events found.</div>';
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>Event</th><th>Sent from GTM</th><th>Events (28 days)</th><th>Users</th><th>Key event</th><th>Status</th></tr></thead>
+    <tbody>${pr.crossRef.map(x => `<tr>
+      <td><code>${esc(x.name)}</code></td>
+      <td class="wrap">${x.inGtm.length ? esc(truncate_(x.inGtm.join(', '), 240)) : '<span class="sub">—</span>'}</td>
+      <td>${pr.hasData ? ga4Num_(x.count) : '—'}</td><td>${pr.hasData ? ga4Num_(x.users) : '—'}</td>
+      <td>${x.isKey ? 'Yes' : ''}</td>
+      <td><span class="sev ${esc(x.sev)}">${esc(x.status)}</span></td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function ga4CoverageHtml(pr) {
+  const c = pr.coverage;
+  return `${c.notes.map(n => `<div class="notice">${esc(n)}</div>`).join('')}
+    <h3>Settings that could not be read</h3>
+    ${c.unavailable.length ? `<p class="hint">These were skipped. Some need extra access, are not available for this property, or are still in Google's alpha API.</p>
+      <ul>${c.unavailable.map(u => `<li>${esc(u)}</li>`).join('')}</ul>` : '<p>Everything the audit asked for was read.</p>'}
+    <h3>Check manually</h3>
+    <p class="hint">The GA4 APIs do not expose these settings with read-only access.</p>
+    <div class="table-wrap"><table class="kv"><tbody>${c.manual.map(m =>
+      `<tr><th scope="row">${esc(m[0])}</th><td class="wrap">${esc(m[1])}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function ga4TabHtml(pr, tab) {
+  if (tab === 'events') {
+    return `<p class="lede">Every event GTM sends, GA4 received in the last 28 days, or is marked as a key event.</p>
+      ${pr.gtmSource ? '' : '<div class="notice">Not cross-checked against GTM. Run a GTM audit for this site (New audit) and then re-run the GA4 audit to fill the GTM column.</div>'}
+      ${ga4EventsTable(pr)}`;
+  }
+  if (tab === 'config') return pr.config.map(ga4KvTable).join('');
+  if (tab === 'quality') {
+    return pr.quality.length ? `<p class="lede">Collected data, last 28 days. Numbers can differ slightly from the GA4 interface because of thresholding and sampling.</p>
+      ${pr.quality.map(ga4DataTable).join('')}` : '<div class="empty"><h3>No collected data</h3>The Data API could not be read for this property. See Coverage.</div>';
+  }
+  if (tab === 'coverage') return ga4CoverageHtml(pr);
+  return `<h2>Areas</h2>${areasTable(pr)}<h2>Prioritised actions</h2>${actionsTable(pr)}`;
+}
+
+function renderGa4Start() {
+  const g = STATE.ga4, s = loadAppSettings(), i = STATE.inputs;
+  const signed = Google.isSignedIn();
+  if (signed && !g.props && !g.loading) loadGa4Properties();
+  const fromGtm = ga4IdsFromGtm();
+  $('#view').innerHTML = `
+    <h1>GA4 audit</h1>
+    <p class="lede">A separate report on GA4 properties: every setting the GA4 Admin API can read, plus the last 28 days of collected data from the Data API, cross-checked against the GTM audit when there is one.</p>
+    <section class="form-block">
+      <h2 style="margin-top:0">Google sign-in</h2>
+      <div class="row">${signed
+        ? '<span class="signed">Signed in to Google</span> <button class="link" data-act="signout">Sign out</button>'
+        : '<button class="btn secondary" data-act="signin">Sign in with Google</button>' +
+          (s.googleClientId ? ' <button class="link" data-act="signin-redirect">Popup not working? Sign in by redirect</button>'
+            : ' <span class="hint">Add a Google OAuth client ID in <button class="link" data-act="goto" data-view="settings">Settings</button> first.</span>')}</div>
+      <p class="hint">Needs read access to the GA4 property, and the Google Analytics Admin API and Data API enabled in your Google Cloud project.</p>
+    </section>
+    <section class="form-block">
+      <h2 style="margin-top:0">Client</h2>
+      <div class="grid2">
+        <div><label for="ga4-client">Client name</label><input type="text" id="ga4-client" value="${esc(i.client)}" placeholder="e.g. Omoda UK"></div>
+        <div><label for="ga4-site">Website</label><input type="url" id="ga4-site" value="${esc(i.site)}" placeholder="https://www.example.co.uk"></div>
+      </div>
+      <p class="hint">Used to check hostnames, self-referrals and that the stream URL matches the site.</p>
+    </section>
+    <section class="form-block">
+      <h2 style="margin-top:0">Properties</h2>
+      ${fromGtm.length ? `<p class="hint">From the GTM audit: ${fromGtm.map(x => '<code>' + esc(x.mid) + '</code>' + (x.prop ? ' → ' + esc(x.prop.displayName) : '')).join(', ')}.
+        ${fromGtm.some(x => !x.prop) && signed ? ' <button class="link" data-act="ga4-from-gtm">Find their properties</button>' : ''}</p>` : ''}
+      ${!signed ? '<p class="hint">Sign in to list the GA4 properties you can access.</p>'
+        : !g.props ? '<p class="hint">Loading your GA4 properties…</p>'
+        : `<div class="toolbar"><input type="search" id="ga4-q" value="${esc(g.query)}" placeholder="Search properties or accounts" aria-label="Search GA4 properties">
+             <span class="hint" id="ga4-count">${g.selected.length} selected</span></div>
+           <div class="ga4-picker" id="ga4-list">${ga4PickerList()}</div>`}
+    </section>
+    <div class="actions">
+      <button class="btn big" id="ga4-run-btn" data-act="ga4-run" ${signed ? '' : 'disabled'}>Run GA4 audit</button>
+      ${g.result ? '<button class="btn secondary" data-act="ga4-back">Back to the report</button>' : ''}
+    </div>
+    <div class="log" id="ga4-log" ${g.log.length ? '' : 'hidden'}>${g.log.map(l => '<div' + (l.err ? ' class="err"' : '') + '>' + esc(l.msg) + '</div>').join('')}</div>`;
+  ['client', 'site'].forEach(k => {
+    const el = $('#ga4-' + k);
+    el.addEventListener('input', () => { STATE.inputs[k] = el.value; saveDraft(); });
+  });
+  const q = $('#ga4-q');
+  if (q) q.addEventListener('input', () => { g.query = q.value; $('#ga4-list').innerHTML = ga4PickerList(); });
+}
+
+function ga4PickerList() {
+  const g = STATE.ga4;
+  const q = g.query.toLowerCase().trim();
+  const list = (g.props || []).filter(p => !q || (p.displayName + ' ' + p.account + ' ' + p.property).toLowerCase().indexOf(q) >= 0);
+  const shown = list.slice().sort((a, b) => (g.selected.indexOf(b.property) >= 0) - (g.selected.indexOf(a.property) >= 0)).slice(0, 200);
+  if (!list.length) return '<p class="hint">No properties match.</p>';
+  return shown.map(p => `<label><input type="checkbox" data-ga4-prop="${esc(p.property)}" ${g.selected.indexOf(p.property) >= 0 ? 'checked' : ''}>
+      <span>${esc(p.displayName)}<span class="sub">${esc(p.account)} · ${esc(p.property.replace('properties/', ''))}</span></span></label>`).join('') +
+    (list.length > shown.length ? `<p class="hint">${list.length - shown.length} more; search to narrow the list.</p>` : '');
+}
+
+// ══════════════════════════════════════════════════════════════════
 //  EXPORTS
 // ══════════════════════════════════════════════════════════════════
 
@@ -1465,24 +1752,70 @@ function exportTechnicalPdf() {
   document.title = title;
 }
 
+function ga4FileSlug(pr) {
+  const base = STATE.ga4.result.client || hostOf_(STATE.ga4.result.site) || pr.displayName || 'ga4';
+  return 'ga4-' + String(base).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '-' + new Date().toISOString().slice(0, 10);
+}
+
+function exportGa4Pdf() {
+  const pr = ga4Current();
+  const target = $('#print-report');
+  target.className = 'client-report';
+  target.innerHTML = clientReportHtml(ga4ClientReportModel(STATE.ga4.result, pr));
+  const title = document.title;
+  document.title = 'GA4 client report - ' + ga4FileSlug(pr);
+  try { window.print(); }
+  finally { document.title = title; }
+}
+
+function exportGa4TechnicalPdf() {
+  const pr = ga4Current();
+  $('#print-report').className = '';
+  $('#print-report').innerHTML = `
+    <div class="page">${ga4ReportHeader(pr)}<h2>Areas</h2>${areasTable(pr)}</div>
+    <div class="page"><h2>Prioritised actions</h2>${actionsTable(pr)}</div>
+    <div class="page"><h2>Events and GTM</h2>${ga4EventsTable(pr)}</div>
+    <div class="page"><h2>Configuration</h2>${pr.config.map(ga4KvTable).join('')}</div>
+    ${pr.quality.length ? `<div class="page"><h2>Data quality (last 28 days)</h2>${pr.quality.map(ga4DataTable).join('')}</div>` : ''}
+    <div class="page"><h2>Coverage</h2>${ga4CoverageHtml(pr)}</div>`;
+  const title = document.title;
+  document.title = 'GA4 audit - ' + ga4FileSlug(pr);
+  window.print();
+  document.title = title;
+}
+
+function exportGa4Csv(kind) {
+  const pr = ga4Current();
+  if (kind === 'events') {
+    download(ga4FileSlug(pr) + '-events.csv', toCsv([['Event', 'Sent from GTM', 'Events (28 days)', 'Users', 'Key event', 'Status']]
+      .concat(pr.crossRef.map(x => [x.name, x.inGtm.join('; '), pr.hasData ? x.count : '', pr.hasData ? x.users : '', x.isKey ? 'Yes' : '', x.status]))), 'text/csv');
+  } else {
+    download(ga4FileSlug(pr) + '-actions.csv', toCsv([['Severity', 'Area', 'Finding', 'Action', 'Property', 'Items']]
+      .concat(pr.issues.map(x => [x.severity, x.area, x.finding, x.action, x.where, (x.items || []).join('; ')]))), 'text/csv');
+  }
+}
+
 function saveAudit() {
   const data = {
-    app: 'tag-audit-studio', v: 1, savedAt: new Date().toISOString(),
+    app: 'tag-audit-studio', v: 1, savedAt: new Date().toISOString(), ga4: STATE.ga4.result || undefined,
     inputs: STATE.inputs, result: STATE.result, ai: { writeup: STATE.ai.writeup, fixplan: STATE.ai.fixplan, chat: STATE.ai.chat },
     overrides: STATE.overrides
   };
-  download('tag-audit-' + fileSlug() + '.json', JSON.stringify(data), 'application/json');
+  const slug = STATE.result || !STATE.ga4.result ? fileSlug() : ga4FileSlug(ga4Current());
+  download('tag-audit-' + slug + '.json', JSON.stringify(data), 'application/json');
 }
 
 function openAudit(text) {
   const d = JSON.parse(text);
-  if (d.app !== 'tag-audit-studio' || !d.result) throw new Error('That file is not a saved Tag Audit Studio audit.');
+  if (d.app !== 'tag-audit-studio' || !(d.result || d.ga4)) throw new Error('That file is not a saved Tag Audit Studio audit.');
   STATE.inputs = Object.assign(STATE.inputs, d.inputs || {});
-  STATE.result = d.result;
+  STATE.result = d.result || null;
   STATE.ai = Object.assign({ writeup: '', fixplan: '', chat: [], busy: '' }, d.ai || {}, { busy: '' });
   STATE.overrides = d.overrides || {};
+  STATE.ga4.result = d.ga4 && Array.isArray(d.ga4.properties) ? d.ga4 : null;
+  STATE.ga4.index = 0; STATE.ga4.tab = 'overview'; STATE.ga4.picking = false;
   updateNav();
-  setView('summary');
+  setView(STATE.result ? 'summary' : 'ga4');
   toast('Audit opened');
 }
 
@@ -1521,6 +1854,31 @@ document.addEventListener('click', async e => {
         if ($('#set-client') && clientId) saveAppSettings({ googleClientId: clientId });
         saveDraft();
         Google.signInRedirect(clientId, STATE.view);
+        break;
+      }
+      case 'ga4-run': await runGa4Audit(); break;
+      case 'ga4-rerun':
+        if (!STATE.ga4.result) break;
+        STATE.ga4.selected = STATE.ga4.result.properties.map(p => p.property);
+        STATE.ga4.result.properties.forEach(p => { STATE.ga4.known[p.property] = { property: p.property, displayName: p.displayName, account: p.account }; });
+        await runGa4Audit({ refresh: true });
+        break;
+      case 'ga4-new': STATE.ga4.picking = true; renderGa4(); break;
+      case 'ga4-back': STATE.ga4.picking = false; renderGa4(); break;
+      case 'ga4-tab': STATE.ga4.tab = el.dataset.tab; renderGa4(); break;
+      case 'ga4-prop': STATE.ga4.index = Number(el.dataset.index) || 0; renderGa4(); break;
+      case 'ga4-pdf': exportGa4Pdf(); break;
+      case 'ga4-pdf-technical': exportGa4TechnicalPdf(); break;
+      case 'ga4-csv-actions': exportGa4Csv('actions'); break;
+      case 'ga4-csv-events': exportGa4Csv('events'); break;
+      case 'ga4-from-gtm': {
+        el.disabled = true; el.textContent = 'Looking up…';
+        const found = await ga4PropertiesForIds(ga4IdsFromGtm().filter(x => !x.prop).map(x => x.mid), ga4Log);
+        found.forEach(p => {
+          STATE.ga4.known[p.property] = p;
+          if (STATE.ga4.selected.indexOf(p.property) < 0) STATE.ga4.selected.push(p.property);
+        });
+        renderGa4();
         break;
       }
       case 'signout': Google.signOut(); toast('Signed out of Google'); VIEWS[STATE.view](); break;
@@ -1590,7 +1948,7 @@ document.addEventListener('click', async e => {
       case 'save-google': saveAppSettings({ googleClientId: $('#set-client').value.trim() }); toast('Google settings saved'); break;
       case 'clear-data':
         ['tas.settings', 'tas.draft', 'tas.gtmPaths', 'tas.ga4Streams', 'tas.ga4Misses'].forEach(k => { try { localStorage.removeItem(k); } catch (x) { /* ignore */ } });
-        STATE.caches = { containers: {}, api: {}, ga4: {}, gtag: {} };
+        STATE.caches = { containers: {}, api: {}, ga4: {}, gtag: {}, ga4full: {} };
         toast('Saved settings and caches cleared'); renderSettings(); break;
     }
   } catch (err) {
@@ -1600,6 +1958,14 @@ document.addEventListener('click', async e => {
 });
 
 $('#open-audit').addEventListener('click', () => $('#open-audit-file').click());
+document.addEventListener('change', e => {
+  if (!e.target.matches('[data-ga4-prop]')) return;
+  const g = STATE.ga4, name = e.target.dataset.ga4Prop;
+  g.selected = g.selected.filter(x => x !== name);
+  if (e.target.checked) g.selected.push(name);
+  const count = $('#ga4-count');
+  if (count) count.textContent = g.selected.length + ' selected';
+});
 document.addEventListener('change', async e => {
   if (!e.target.matches('[data-runner-file]')) return;
   const f = e.target.files[0];
