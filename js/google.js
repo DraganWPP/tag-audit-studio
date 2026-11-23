@@ -12,7 +12,8 @@ const GOOGLE_SCOPES = [
 ].join(' ');
 // Optional permissions, requested only when the user turns on a feature that needs them
 const CM360_SCOPE = 'https://www.googleapis.com/auth/dfareporting';   // CM360 reports (no campaign/Floodlight edits)
-const GOOGLE_OPTIONAL_SCOPES = [CM360_SCOPE];
+const GSC_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';   // Search Console, read only
+const GOOGLE_OPTIONAL_SCOPES = [CM360_SCOPE, GSC_SCOPE];
 const GOOGLE_SESSION_KEY = 'tas.googleSession';           // sessionStorage: { token, expires, user }
 const GOOGLE_HINT_KEY = 'tas.googleHint';                 // localStorage: last account, suggested at sign-in
 const GTM_API = 'https://tagmanager.googleapis.com/tagmanager/v2/';
@@ -649,6 +650,26 @@ async function fetchGa4Full(prop, progress) {
     };
     data.piiPages = ga4ReportRows_(b2[3]).map(r => ({ masked: maskPiiUrl_(r.d[0]), views: r.m[0] }));
     data.campaigns30d = ga4ReportRows_(b2[4]).map(r => ({ campaign: r.d[0], sourceMedium: r.d[1], sessions: r.m[0] }));
+  }
+
+  // Organic Google sessions per landing page, for the Search Console cross-check. Search Console data
+  // lags about 3 days, so this uses the same 28 days (30 to 3 days ago).
+  const b3 = await soft('Collected data: organic Google landing pages', () => batch([
+    R(['hostName', 'landingPage'], ['sessions'], {
+      dateRanges: [{ startDate: '30daysAgo', endDate: '3daysAgo' }],
+      dimensionFilter: { andGroup: { expressions: [exact('sessionSource', 'google'), exact('sessionMedium', 'organic')] } },
+      metricAggregations: ['TOTAL'], orderBys: desc('sessions'), limit: 5000
+    })
+  ]), null);
+  if (b3) {
+    b3.forEach(note);
+    const rows = ga4ReportRows_(b3[0]);
+    const total = ga4ReportTotal_(b3[0]);
+    data.organic = {
+      total: total === null ? rows.reduce((s, r) => s + r.m[0], 0) : total,
+      complete: rows.length < 5000,
+      pages: rows.map(r => ({ host: String(r.d[0] || '').toLowerCase(), path: gscPathKey_(r.d[1]), sessions: r.m[0] }))
+    };
   }
 
   // How often each custom dimension is empty

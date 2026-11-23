@@ -160,13 +160,14 @@ The key is stored in the browser's local storage and sent only to that provider.
 
 1. **GTM and consent audit** from the sources you added.
 2. **GA4 audit** (if *Also run the full GA4 audit* is ticked and you're signed in): finds the GA4 properties behind the live measurement IDs in GTM and audits them.
-3. **CM360 check** (if *Then run the CM360 check* is ticked and GTM has Floodlight tags): finds the CM360 account that owns the Floodlight configuration, runs the two reports, then **pauses for you**:
+3. **Search Console check** (if *Then run the Search Console check* is ticked and the website is filled in): finds the Search Console property for the website and checks it against GA4. See below.
+4. **CM360 check** (if *Then run the CM360 check* is ticked and GTM has Floodlight tags): finds the CM360 account that owns the Floodlight configuration, runs the two reports, then **pauses for you**:
    - if CM360 isn't connected yet, click **Connect CM360**; the run carries on by itself when you come back
    - download the two reports with one click each, then drag both files from Chrome's download bubble (or Ctrl+J) onto the drop zone. Chrome doesn't let websites read the Downloads folder, so this one step stays manual.
 
-Steps that don't apply are marked *Skipped* with the reason (no GA4 ID, no Floodlight tags, not signed in, no CM360 account owns the configuration). If only the GTM audit applied, the run opens the Summary as before.
+Steps that don't apply are marked *Skipped* with the reason (no GA4 ID, no website, no Floodlight tags, not signed in, no CM360 account owns the configuration). When Search Console and CM360 both need their extra permission, one **Connect** button asks for both in a single Google round trip. If only the GTM audit applied, the run opens the Summary as before.
 
-The **Overview** shows each report's grade, the high and medium actions across all of them, and **Combined client PDF**: an overview page followed by the client report of each review (GTM and consent, each GA4 property, CM360).
+The **Overview** shows each report's grade, the high and medium actions across all of them, and **Combined client PDF**: an overview page followed by the client report of each review (GTM and consent, each GA4 property, Search Console, CM360).
 
 ## GA4 audit (separate report)
 
@@ -184,6 +185,25 @@ The **Overview** shows each report's grade, the high and medium actions across a
   - a GA4 client PDF, a technical PDF and CSVs
   - **Save audit** includes the GA4 report
 - **Not readable with read-only access, so listed as manual checks:** internal traffic and data filters, unwanted referrals, cross-domain domains, session timeout, user access and change history. Some settings come from Google's alpha Admin API and can be unavailable for some properties; the Coverage tab lists anything that couldn't be read.
+
+## Search Console check
+
+**Search Console** in the left rail (and step 3 of the automatic run) finds the site's Google Search Console property and compares Google search with GA4. Last 28 days, ending 3 days ago because Search Console data runs about 3 days behind.
+
+**Setup:** enable the **Google Search Console API** in the Google Cloud project.
+
+**Access:** **Connect Search Console** asks for one extra permission, `webmasters.readonly`, only when someone uses this check. It can read Search Console data and change nothing.
+
+**Finding the property:** Search Console has no link to GTM, so the property is found from the website. The app lists the properties your Google account can see and picks the one covering the site's hostname: a Domain property (`sc-domain:`) first, then URL-prefix properties. If the property is under the client's or another agency's account and you were never added, the check reports that no property you can access covers the site.
+
+**What it checks:**
+- **Property & access:** no property you can access, only URL-prefix properties (no Domain property), restricted access, and several Search Console verification tags in the pasted page source (each is a verified owner, often including former agencies).
+- **Sitemaps & indexing:** no sitemap, sitemaps with errors or warnings, sitemaps Google hasn't read for over 30 days, search traffic landing on `http://` pages or on test/staging hosts, and traffic split between `www` and non-`www`.
+- **Search vs analytics** (needs the GA4 audit for the same site): Search Console clicks compared with GA4 organic Google sessions for the same 28 days, and landing pages with 20 or more search clicks but no GA4 organic sessions, which usually means the GA4 tag doesn't load on those pages.
+
+**Kept:** totals, the top landing page paths (no query strings; addresses that look like personal data are masked) and sitemap addresses. Search queries are not read.
+
+**Not readable with read-only access, so check by hand:** owners and users, indexing per page and the link between Search Console and GA4.
 
 ## CM360 check (Floodlight and delivery)
 

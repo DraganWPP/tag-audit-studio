@@ -451,6 +451,110 @@ function cm360ClientReportModel(r, meta) {
   };
 }
 
+// ── Search Console client report ────────────────────────────────────
+
+const GSC_CLIENT_AREAS = {
+  'Property & access': ['Search Console access', 'SEO / web team',
+    'Search Console access is incomplete, so search performance and site health cannot be fully monitored.',
+    'Set up a Domain property and give the agency Full user access; review who owns the property.',
+    'Confirm the property shows data for every version of the site.'],
+  'Sitemaps & indexing': ['Sitemaps & indexing', 'SEO / web team',
+    'Google may not find or show the right pages of the site.',
+    'Fix the sitemap errors and make sure Google only shows the live, secure version of each page.',
+    'Resubmit the sitemaps and check Search Console the following week.'],
+  'Search vs analytics': ['Search traffic in analytics', 'Analytics / web team',
+    'Visits from Google search do not fully arrive in analytics, so organic performance is under-reported.',
+    'Make sure the analytics tag loads on every page and check the effect of the cookie banner on measurement.',
+    'Compare search clicks with analytics visits for the following week.']
+};
+
+const GSC_CLIENT_FINDING_COPY = [
+  [/No Search Console property you can access|unverified/i, 'Give access to Search Console',
+    'The agency cannot see the site\'s Search Console data, so search performance and site health are not monitored.',
+    'Grant the agency Full user access to a Domain property for the site, or set one up.'],
+  [/Only URL-prefix properties/i, 'Monitor the whole domain in Search Console',
+    'Search Console only covers some versions of the site, so data for other versions is missing.',
+    'Add a Domain property so every version of the site is covered in one place.'],
+  [/verification tags/i, 'Review who has access to Search Console',
+    'Several parties are verified owners of the site in Search Console, possibly including former agencies.',
+    'Review the owners and remove those who no longer need access.'],
+  [/No sitemap submitted/i, 'Submit a sitemap',
+    'Without a sitemap, Google may take longer to find new and updated pages.',
+    'Submit the site\'s sitemap in Search Console.'],
+  [/sitemap\(s\) with errors/i, 'Fix sitemap errors',
+    'Google reports errors in the sitemaps, so some pages may not be found.',
+    'Fix the errors and resubmit the sitemaps.'],
+  [/sitemap\(s\) with warnings|not read by Google/i, 'Tidy up the sitemaps',
+    'Some sitemaps contain warnings or are out of date.',
+    'Remove out-of-date sitemaps and correct the listed addresses.'],
+  [/over http:\/\//i, 'Send all search visits to the secure site',
+    'Some search results still lead to the non-secure (http) version of pages.',
+    'Redirect all http pages to https permanently.'],
+  [/staging hosts/i, 'Remove test sites from Google',
+    'Test or staging versions of the site appear in Google search.',
+    'Block test sites from search engines and remove them from Google.'],
+  [/both .* and www\./i, 'Use one version of the site address',
+    'Search visitors land on two versions of the site address, which splits search signals.',
+    'Redirect one version to the other and use it consistently.'],
+  [/organic Google sessions for/i, 'Measure all visits from Google search',
+    'Analytics records far fewer visits from Google search than Google reports clicks.',
+    'Check the analytics tag loads on every page and review the cookie banner\'s effect on measurement.'],
+  [/search clicks but no GA4 organic sessions/i, 'Measure every page people reach from Google',
+    'Some pages receive visits from Google search but analytics records none, so they are probably not measured.',
+    'Make sure the tag manager and analytics tag load on these pages.']
+];
+
+function gscClientReportModel(r, meta) {
+  if (!r || !Array.isArray(r.issues)) throw new Error('Run the Search Console check before exporting a report.');
+  meta = meta || {};
+  const counts = { High: 0, Medium: 0, Low: 0 };
+  const actions = r.issues.map((issue, index) => {
+    counts[issue.severity]++;
+    const area = GSC_CLIENT_AREAS[issue.area] || ['Search review', 'SEO / web team', 'A search setting needs review.',
+      'Review the flagged item with the web team.', 'Recheck after any changes.'];
+    const copy = GSC_CLIENT_FINDING_COPY.find(row => row[0].test(issue.finding));
+    return {
+      id: 'gsc-finding-' + (index + 1), area: issue.area, severity: issue.severity,
+      title: copy ? copy[1] : 'Review ' + area[0].toLowerCase(),
+      why: copy ? copy[2] : area[2], recommendation: copy ? copy[3] : area[3],
+      verify: area[4], team: area[1],
+      evidence: issue.area === 'Search vs analytics' ? 'Search Console and analytics, last 28 days' : 'Search Console',
+      affected: Array.isArray(issue.items) ? issue.items.length : 0
+    };
+  });
+  const areaGroups = r.areas.map(a => {
+    const relevant = actions.filter(x => x.area === a.area);
+    const severity = relevant.length ? relevant[0].severity : null;
+    return {
+      label: (GSC_CLIENT_AREAS[a.area] || [a.area])[0], severity,
+      status: severity === 'High' ? 'High priority' : severity === 'Medium' ? 'Needs attention' : severity === 'Low' ? 'Maintenance'
+        : a.score === null ? 'Not checked' : 'No issues identified',
+      note: relevant.length ? relevant.length + ' recommendation' + (relevant.length === 1 ? '' : 's') + '.'
+        : a.score === null ? 'Needs more data to assess.' : 'Within the available checks.'
+    };
+  });
+  const score = r.score.score;
+  return {
+    client: meta.client || hostOf_(meta.site) || r.host,
+    site: joinParts_(meta.site || r.meta.site, r.property && 'Search Console: ' + r.property),
+    date: new Date(r.meta.date || Date.now()).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }),
+    score, grade: r.score.grade,
+    health: score >= 90 ? 'Strong search health' : score >= 75 ? 'Some improvements needed'
+      : score >= 60 ? 'Improvements needed' : 'Priority action needed',
+    counts, findingCount: r.issues.length, liveCount: 0, actions, areas: areaGroups,
+    coverage: [
+      'Search Console access, sitemaps and search performance from the last 28 days reviewed.',
+      r.ga4Source ? 'Search clicks compared with analytics visits, per page.' : 'Search clicks not compared with analytics.'
+    ],
+    first: actions.length ? actions[0].title : 'Keep the current setup under review.',
+    caveat: 'Score reflects Search Console setup and how search and analytics data agree, not search rankings or legal compliance.',
+    limits: 'Owners and users, indexing per page and the link between Search Console and analytics need a manual check.',
+    noActions: 'No recommendations from the available checks. Review the coverage notes before drawing conclusions.',
+    heading: 'Google Search Console review', title: 'Your search health.', footerLabel: 'Search Console client report',
+    priorityNote: 'Page-level detail is in the technical report.'
+  };
+}
+
 /**
  * Cover page for the combined client report.
  *  reports: [{ label, model }] in report order; notChecked: [text] for reports that were not run.

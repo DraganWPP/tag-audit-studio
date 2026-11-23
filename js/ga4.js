@@ -424,6 +424,7 @@ function buildGa4Result(d, gtm, meta) {
     },
     hasData: hasData,
     campaigns30d: D.campaigns30d || null,   // for the CM360 cross-check (sessions per campaign, last 30 days)
+    organic28d: D.organic || null,          // for the Search Console cross-check (organic Google sessions per landing page)
     gtmSource: gtmRelevant ? gtm.source : null,
     issues: sorted, areas: areas, score: { score: score, grade: grade },
     crossRef: crossRef,
