@@ -70,17 +70,25 @@ async function cm360RunTemporaryReport(profileId, criteria, type, progress) {
 async function cm360Download(reportId, file) {
   const urls = [CM360_API + 'reports/' + reportId + '/files/' + file.id + '?alt=media'];
   if (file.urls && file.urls.apiUrl) urls.push(file.urls.apiUrl);
-  let last = null;
+  const problems = [];
   for (const url of urls) {
     try {
       const res = await fetch(url, { headers: { Authorization: 'Bearer ' + Google.token } });
       if (res.ok) return await res.text();
-      last = new Error('HTTP ' + res.status + ' from ' + url.split('?')[0]);
+      problems.push('HTTP ' + res.status + ' from ' + url.split('?')[0]);
     } catch (e) {
-      last = new Error('The browser blocked the download (' + e.message + ') from ' + url.split('?')[0]);
+      // Diagnose: did Google answer with a redirect to another server (which then blocked the browser)?
+      let how = 'blocked (' + e.message + ')';
+      try {
+        const probe = await fetch(url, { headers: { Authorization: 'Bearer ' + Google.token }, redirect: 'manual' });
+        if (probe.type === 'opaqueredirect') how = 'redirected by Google to a file server that does not allow browser downloads (CORS)';
+        else how += '; without following redirects the answer was HTTP ' + probe.status;
+      } catch (e2) { how += '; the request itself was blocked'; }
+      problems.push(how + ' from ' + url.split('?')[0]);
     }
   }
-  throw last;
+  throw new Error('The browser could not download the report file: ' + problems.join(' | ') +
+    (file.urls && file.urls.browserUrl ? ' | A manual download link is available (browserUrl).' : ''));
 }
 
 /** CM360 CSV files have a preamble; the data table starts after the "Report Fields" line. */
