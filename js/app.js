@@ -1554,6 +1554,27 @@ function renderSettings() {
     </section>
 
     <section class="form-block">
+      <h2 style="margin-top:0">Google Ads test</h2>
+      <p class="hint">Checks whether the Google Ads API works with your access: finds the account behind a GTM <code>AW-</code> ID and reads its conversion actions,
+        conversion settings and last 30 days of clicks. Only read requests are sent. Google Ads has no read-only permission, so what could be changed is limited by your own role in each account.
+        The log shows counts only.</p>
+      <div class="grid2" style="margin-top:12px">
+        <div><label for="ads-token">Developer token</label><input type="password" id="ads-token" value="${esc(s.adsDevToken || '')}" autocomplete="off" placeholder="From the manager account: Admin → API Center">
+          <p class="hint">Kept in this browser only. Needs Basic access for real (non-test) accounts.</p></div>
+        <div><label for="ads-login">Manager account ID (optional)</label><input type="text" id="ads-login" value="${esc(s.adsLoginId || '')}" placeholder="123-456-7890">
+          <p class="hint">The MCC you reach client accounts through. Leave empty to use every manager account you can access.</p></div>
+      </div>
+      <div class="row" style="margin-top:10px">${!Google.isSignedIn() ? googleStatusHtml() : Google.hasScope(ADS_SCOPE)
+        ? '<span class="signed">Google Ads connected</span>'
+        : '<button class="btn secondary" data-act="ads-connect">Connect Google Ads</button>'}</div>
+      <label for="ads-aw" style="margin-top:12px">Google Ads conversion ID to find</label>
+      <div class="row"><input type="text" id="ads-aw" value="${esc(adsIdsFromGtm()[0] || '')}" placeholder="AW-123456789" style="max-width:260px">
+        <button class="btn secondary" data-act="ads-test" ${Google.hasScope(ADS_SCOPE) ? '' : 'disabled'}>Run Google Ads test</button></div>
+      ${adsIdsFromGtm().length ? '<p class="hint">From the GTM audit: ' + adsIdsFromGtm().map(esc).join(', ') + '</p>' : ''}
+      <div class="log" id="ads-log" hidden></div>
+    </section>
+
+    <section class="form-block">
       <h2 style="margin-top:0">Appearance and data</h2>
       <div class="row">
         <label for="set-theme" style="margin:0">Theme</label>
@@ -1563,6 +1584,126 @@ function renderSettings() {
     </section>`;
   $('#set-provider').addEventListener('change', e => { saveAppSettings({ aiProvider: e.target.value, aiModel: '', aiBase: '' }); renderSettings(); });
   $('#set-theme').addEventListener('change', e => { saveAppSettings({ theme: e.target.value }); applyTheme(); });
+}
+
+/** Google Ads conversion IDs (AW-…) the GTM audit found. */
+function adsIdsFromGtm() {
+  const r = STATE.result;
+  if (!r) return [];
+  return Array.from(new Set(Object.keys(r.audit.ids).map(k => r.audit.ids[k])
+    .filter(x => x.platform === 'Google Ads' && /^AW-\d+$/.test(x.id)).map(x => x.id)));
+}
+
+/** Google Ads feasibility test (Settings). Logs counts and settings only, no names or campaign data. */
+async function adsTest(aw) {
+  const box = $('#ads-log');
+  box.hidden = false; box.innerHTML = '';
+  const say = (msg, err) => {
+    box.insertAdjacentHTML('beforeend', '<div' + (err ? ' class="err"' : '') + '>' + esc(msg) + '</div>');
+    box.scrollTop = box.scrollHeight;
+  };
+  const s = loadAppSettings();
+  const opt = { devToken: s.adsDevToken, loginId: '' };
+  const fail = (step, e) => {
+    let hint = '';
+    if (/DEVELOPER_TOKEN_NOT_APPROVED/.test(e.message)) hint = ' The developer token only has test access: apply for Basic access in the manager account\'s API Center.';
+    else if (/DEVELOPER_TOKEN_INVALID|DEVELOPER_TOKEN_PROHIBITED/.test(e.message)) hint = ' Check the developer token.';
+    else if (/USER_PERMISSION_DENIED/.test(e.message)) hint = ' Your Google account has no access to that account, or the manager account ID is wrong.';
+    else if (/has not been used|is disabled|SERVICE_DISABLED/.test(e.message)) hint = ' Enable the Google Ads API in the Google Cloud project.';
+    say('✖ ' + step + ': ' + e.message + hint, true);
+  };
+  const t0 = Date.now();
+  // 1. Accounts reachable directly
+  let direct;
+  try { direct = await adsAccessibleCustomers(opt); }
+  catch (e) { fail('Listing your Google Ads accounts', e); return; }
+  say('✔ Google Ads API works (' + adsVersion_ + '). Your Google account reaches ' + direct.length + ' account(s) directly.');
+
+  // 2. Which of them are manager accounts
+  const info = await runPooled_(direct.slice(0, 60).map(id => async () => {
+    try { return Object.assign({ id: id }, await adsCustomer(id, opt, id)); } catch (e) { return { id: id, error: e }; }
+  }), 5);
+  const errs = info.filter(x => x.error);
+  const managers = info.filter(x => !x.error && x.manager);
+  say('  Of these: ' + managers.length + ' manager account(s), ' + info.filter(x => !x.error && !x.manager).length + ' client account(s)' +
+      (errs.length ? ', ' + errs.length + ' not readable' : '') + (direct.length > 60 ? ' (first 60 checked)' : '') + '.');
+  if (errs.length) fail('Example of an unreadable account', errs[0].error);
+
+  // 3. Client accounts under the manager accounts
+  const loginOverride = adsDigits_(s.adsLoginId);
+  const mgrIds = loginOverride ? [loginOverride] : managers.map(m => m.id);
+  const clients = [];
+  for (const m of mgrIds) {
+    try {
+      const list = await adsClients(m, opt);
+      list.filter(c => !c.manager && c.status === 'ENABLED').forEach(c => clients.push({ id: String(c.id), via: m, test: !!c.testAccount }));
+      say('✔ Manager account ' + m.replace(/(\d{3})(\d{3})(\d+)/, '$1-$2-$3') + ': ' + list.length + ' account(s) underneath, ' +
+          list.filter(c => !c.manager && c.status === 'ENABLED').length + ' enabled client account(s).');
+    } catch (e) { fail('Reading accounts under manager ' + m, e); }
+  }
+
+  // 4. Find the account behind the AW- ID
+  const want = adsConversionId_(aw);
+  if (!want) { say('Enter a Google Ads conversion ID (AW-…) to find its account.'); return; }
+  say('Looking for the account behind AW-' + want + '…');
+  let found = info.find(x => !x.error && !x.manager && x.conversionTrackingSetting &&
+    String(x.conversionTrackingSetting.conversionTrackingId) === want);
+  let via = found ? found.id : '';
+  const seen = new Set(info.map(x => x.id));
+  const queue = clients.filter(c => !seen.has(c.id)).slice(0, 1500);
+  let checked = 0;
+  for (let i = 0; i < queue.length && !found; i += 10) {
+    const batch = queue.slice(i, i + 10);
+    const res = await runPooled_(batch.map(c => async () => {
+      try { return Object.assign({ id: c.id, via: c.via }, await adsCustomer(c.id, opt, c.via)); } catch (e) { return null; }
+    }), 5);
+    checked += batch.length;
+    found = res.find(x => x && x.conversionTrackingSetting && (String(x.conversionTrackingSetting.conversionTrackingId) === want ||
+      String(x.conversionTrackingSetting.crossAccountConversionTrackingId) === want)) || null;
+    if (found) via = found.via;
+    if (!found && checked % 100 === 0) say('  …' + checked + ' of ' + queue.length + ' client accounts checked');
+  }
+  if (!found) {
+    say('✖ No account you can reach uses AW-' + want + (queue.length ? ' (' + (checked + info.length) + ' accounts checked)' : '') +
+        '. It may belong to another agency\'s or the client\'s own account.', true);
+    return;
+  }
+  const cts = found.conversionTrackingSetting || {};
+  const cross = String(cts.crossAccountConversionTrackingId || '') === want && String(cts.conversionTrackingId || '') !== want;
+  say('✔ Found in ' + (Math.round((Date.now() - t0) / 100) / 10) + 's: account ' + String(found.id).replace(/(\d{3})(\d{3})(\d+)/, '$1-$2-$3') +
+      (cross ? ' (AW-' + want + ' is its manager\'s cross-account conversion tracking ID)' : '') + (found.testAccount ? ', test account' : '') + '.');
+  say('  Auto-tagging: ' + (found.autoTaggingEnabled ? 'on' : 'OFF') + ' · conversion tracking status: ' + (cts.conversionTrackingStatus || 'not returned') +
+      ' · enhanced conversions for leads: ' + (cts.enhancedConversionsForLeadsEnabled ? 'on' : 'off') +
+      ' · customer data terms accepted: ' + (cts.acceptedCustomerDataTerms ? 'yes' : 'no'));
+
+  // 5. Conversion actions, their tags and 30-day conversions
+  try {
+    const acts = (await adsSearch(found.id, 'SELECT conversion_action.id, conversion_action.status, conversion_action.type, ' +
+      'conversion_action.primary_for_goal, conversion_action.tag_snippets FROM conversion_action', opt, via)).map(r => r.conversionAction);
+    const enabled = acts.filter(a => a.status === 'ENABLED');
+    const labels = [].concat(...enabled.map(adsSnippetLabels_));
+    const types = {};
+    enabled.forEach(a => { types[a.type] = (types[a.type] || 0) + 1; });
+    say('✔ Conversion actions: ' + acts.length + ' (' + enabled.length + ' enabled, ' + enabled.filter(a => a.primaryForGoal).length + ' primary). Types: ' +
+        Object.keys(types).map(k => k + ' ' + types[k]).join(', '));
+    say('  Website tags: ' + labels.length + ' AW-ID/label pair(s) in the tag snippets, ' + labels.filter(l => l.indexOf(want + '/') === 0).length + ' for AW-' + want + '.');
+    const conv = await adsSearch(found.id, 'SELECT segments.conversion_action, metrics.all_conversions FROM customer WHERE segments.date DURING LAST_30_DAYS', opt, via);
+    const withConv = new Set(conv.filter(r => Number(r.metrics.allConversions) > 0).map(r => r.segments.conversionAction));
+    say('✔ Last 30 days: ' + withConv.size + ' conversion action(s) recorded conversions; ' +
+        enabled.filter(a => !withConv.has('customers/' + found.id + '/conversionActions/' + a.id)).length + ' enabled action(s) recorded none.');
+  } catch (e) { fail('Conversion actions', e); }
+
+  // 6. Campaign delivery
+  try {
+    const camps = await adsSearch(found.id, 'SELECT campaign.id, campaign.advertising_channel_type, metrics.clicks, metrics.impressions ' +
+      'FROM campaign WHERE segments.date DURING LAST_30_DAYS AND metrics.impressions > 0', opt, via);
+    const sum = k => camps.reduce((t, r) => t + Number(r.metrics[k] || 0), 0);
+    const ch = {};
+    camps.forEach(r => { const c = r.campaign.advertisingChannelType; ch[c] = (ch[c] || 0) + 1; });
+    say('✔ Campaigns with impressions in the last 30 days: ' + camps.length + ' (' + Object.keys(ch).map(k => k + ' ' + ch[k]).join(', ') + '); ' +
+        sum('clicks') + ' clicks, ' + sum('impressions') + ' impressions.');
+  } catch (e) { fail('Campaigns', e); }
+  say('Test finished. Only read requests were sent; nothing was changed in Google Ads.');
 }
 
 function applyTheme() {
@@ -2815,6 +2956,16 @@ document.addEventListener('click', async e => {
         Google.signInRedirect(googleClientId(), STATE.view, [CM360_SCOPE]);
         break;
       case 'cm360-run': await runCm360Reports(); break;
+      case 'ads-connect':
+        saveAppSettings({ adsDevToken: $('#ads-token').value.trim(), adsLoginId: $('#ads-login').value.trim() });
+        if (!stashForSignIn()) break;
+        Google.signInRedirect(googleClientId(), STATE.view, [ADS_SCOPE]);
+        break;
+      case 'ads-test':
+        saveAppSettings({ adsDevToken: $('#ads-token').value.trim(), adsLoginId: $('#ads-login').value.trim() });
+        el.disabled = true;
+        try { await adsTest($('#ads-aw').value); } finally { el.disabled = false; }
+        break;
       case 'gsc-connect':
         if (!stashForSignIn()) break;
         Google.signInRedirect(googleClientId(), STATE.view, [GSC_SCOPE]);
