@@ -1523,10 +1523,14 @@ function renderSettings() {
     <section class="form-block">
       <h2 style="margin-top:0">Campaign Manager 360 (connection test)</h2>
       <p class="hint">Checks whether this app can read CM360 reports for your account: it lists your CM360 profiles and Floodlight configurations,
-        then creates a small temporary report (campaigns, impressions, clicks, last 7 days), downloads it and deletes it. Only counts are shown.
+        then creates a small temporary report (campaigns, impressions, clicks, yesterday), downloads it and deletes it. Only counts are shown.
         The permission is reports only: it cannot change campaigns, ads or Floodlight.</p>
       <div class="actions">${!Google.isSignedIn() ? '<span class="hint" style="margin:0">Sign in with Google first.</span>'
-        : Google.hasScope(CM360_SCOPE) ? '<button class="btn secondary" data-act="cm360-test">Run CM360 connection test</button>'
+        : Google.hasScope(CM360_SCOPE) ? (STATE.cm360Profiles && STATE.cm360Profiles.length
+            ? `<label for="cm360-profile" style="margin:0">CM360 account</label>
+               <select id="cm360-profile" style="width:auto;max-width:100%">${STATE.cm360Profiles.map(p =>
+                 `<option value="${esc(p.profileId)}">${esc(p.accountName)} (${esc(p.accountId)})</option>`).join('')}</select>` : '') +
+            '<button class="btn secondary" data-act="cm360-test">Run CM360 connection test</button>'
         : '<button class="btn secondary" data-act="cm360-connect">Connect CM360 (adds the reports permission)</button>'}</div>
       <div class="log" id="cm360-log" hidden></div>
     </section>
@@ -1965,13 +1969,24 @@ document.addEventListener('click', async e => {
           box.scrollTop = box.scrollHeight;
         };
         el.disabled = true; el.textContent = 'Testing…';
+        const pick = $('#cm360-profile');
         try {
-          const s = await cm360ConnectionTest(out);
+          const s = await cm360ConnectionTest(out, pick ? pick.value : null);
           out(s.download ? 'Result: CM360 reports can be read from the browser. The full CM360 feature is feasible.'
                          : 'Result: see the failed step above.', !s.download);
         } catch (e) {
           out('Result: the test stopped at the step above.', true);
-        } finally { el.disabled = false; el.textContent = 'Run CM360 connection test'; }
+        } finally {
+          el.disabled = false; el.textContent = 'Run CM360 connection test';
+          // Offer an account picker for the next run
+          const list = cm360ConnectionTest.lastProfiles || [];
+          if (!pick && list.length > 1) {
+            STATE.cm360Profiles = list;
+            el.insertAdjacentHTML('beforebegin', `<label for="cm360-profile" style="margin:0">CM360 account</label>
+              <select id="cm360-profile" style="width:auto;max-width:100%">${list.map(p =>
+                `<option value="${esc(p.profileId)}">${esc(p.accountName)} (${esc(p.accountId)})</option>`).join('')}</select>`);
+          }
+        }
         break;
       }
       case 'ga4-run': await runGa4Audit(); break;

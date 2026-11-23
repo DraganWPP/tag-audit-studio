@@ -41,11 +41,22 @@ async function cm360RunTemporaryReport(profileId, criteria, type, progress) {
   try {
     progress && progress('Report created; running it…');
     let file = await Google.post(CM360_API + 'userprofiles/' + profileId + '/reports/' + report.id + '/run?synchronous=false', {});
-    for (let i = 0; i < 40 && file.status === 'PROCESSING'; i++) {
+    // CM360 queues reports (QUEUED), then builds them (PROCESSING). Large network accounts can take a few minutes.
+    const started = Date.now(), limit = 6 * 60 * 1000;
+    let lastStatus = '';
+    for (let i = 0; /^(QUEUED|PROCESSING)$/.test(file.status) && Date.now() - started < limit; i++) {
+      if (file.status !== lastStatus || i % 6 === 5) {
+        progress && progress('Report ' + file.status.toLowerCase() + ' in CM360 (' + Math.round((Date.now() - started) / 1000) + 's)…');
+        lastStatus = file.status;
+      }
       await cm360Sleep(Math.min(2000 + i * 1000, 10000));
       file = await Google.get(CM360_API + 'reports/' + report.id + '/files/' + file.id);
     }
-    if (file.status !== 'REPORT_AVAILABLE') throw new Error('The report did not finish (status ' + file.status + ').');
+    if (file.status !== 'REPORT_AVAILABLE') {
+      throw new Error(/^(QUEUED|PROCESSING)$/.test(file.status)
+        ? 'CM360 had not finished the report after 6 minutes (still ' + file.status.toLowerCase() + '). Try again later or with a smaller account.'
+        : 'The report did not finish (status ' + file.status + ').');
+    }
     progress && progress('Report ready; downloading it in the browser…');
     const text = await cm360Download(report.id, file);
     return { text: text, rows: cm360CsvRows(text) };
@@ -81,8 +92,8 @@ function cm360CsvRows(text) {
 }
 
 /** Feasibility test: logs each step; returns a summary object. Never logs report contents. */
-async function cm360ConnectionTest(log) {
-  const summary = { profiles: 0, floodlightConfigs: null, reportRows: null, download: false };
+async function cm360ConnectionTest(log, profileId) {
+  const summary = { profiles: 0, profileList: [], floodlightConfigs: null, reportRows: null, download: false };
   const step = async (name, fn) => {
     log('… ' + name);
     try { const v = await fn(); log('✔ ' + name); return v; }
@@ -90,18 +101,21 @@ async function cm360ConnectionTest(log) {
   };
   const profiles = await step('List your CM360 user profiles', cm360Profiles);
   summary.profiles = profiles.length;
+  summary.profileList = profiles;
+  cm360ConnectionTest.lastProfiles = profiles;   // lets the page offer an account picker even if a later step fails
   log(profiles.length + ' profile(s): ' + profiles.map(p => p.accountName + ' (account ' + p.accountId + ')').join(', '));
   if (!profiles.length) { log('This Google account has no CM360 profile, so nothing else can be tested.', true); return summary; }
-  const pid = profiles[0].profileId;
-  log('Testing with the first profile (account ' + profiles[0].accountName + ').');
+  const chosen = profiles.find(p => String(p.profileId) === String(profileId)) || profiles[0];
+  const pid = chosen.profileId;
+  log('Testing with account ' + chosen.accountName + (profileId ? '.' : ' (the first one; choose another above to test it).'));
   try {
     const configs = await step('Look up Floodlight configurations (reporting lookup)', () => cm360FloodlightConfigs(pid));
     summary.floodlightConfigs = configs.length;
     log(configs.length + ' Floodlight configuration(s) visible: ' + configs.map(c => c.id).slice(0, 10).join(', '));
   } catch (e) { /* logged; carry on with the report test */ }
-  const result = await step('Create, run, download and delete a small temporary report (campaigns, impressions, clicks, last 7 days)',
+  const result = await step('Create, run, download and delete a small temporary report (campaigns, impressions, clicks, yesterday)',
     () => cm360RunTemporaryReport(pid, {
-      dateRange: { relativeDateRange: 'LAST_7_DAYS' },
+      dateRange: { relativeDateRange: 'YESTERDAY' },
       dimensions: [{ name: 'campaign' }],
       metricNames: ['impressions', 'clicks']
     }, 'STANDARD', log));
