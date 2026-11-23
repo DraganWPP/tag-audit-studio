@@ -652,6 +652,26 @@ async function fetchGa4Full(prop, progress) {
     data.campaigns30d = ga4ReportRows_(b2[4]).map(r => ({ campaign: r.d[0], sourceMedium: r.d[1], sessions: r.m[0] }));
   }
 
+  // Organic Google sessions per landing page, for the Search Console cross-check. Search Console data
+  // lags about 3 days, so this uses the same 28 days (30 to 3 days ago).
+  const b3 = await soft('Collected data: organic Google landing pages', () => batch([
+    R(['hostName', 'landingPage'], ['sessions'], {
+      dateRanges: [{ startDate: '30daysAgo', endDate: '3daysAgo' }],
+      dimensionFilter: { andGroup: { expressions: [exact('sessionSource', 'google'), exact('sessionMedium', 'organic')] } },
+      metricAggregations: ['TOTAL'], orderBys: desc('sessions'), limit: 5000
+    })
+  ]), null);
+  if (b3) {
+    b3.forEach(note);
+    const rows = ga4ReportRows_(b3[0]);
+    const total = ga4ReportTotal_(b3[0]);
+    data.organic = {
+      total: total === null ? rows.reduce((s, r) => s + r.m[0], 0) : total,
+      complete: rows.length < 5000,
+      pages: rows.map(r => ({ host: String(r.d[0] || '').toLowerCase(), path: gscPathKey_(r.d[1]), sessions: r.m[0] }))
+    };
+  }
+
   // How often each custom dimension is empty
   const dims = (admin.customDimensions || []).filter(x => x.scope === 'EVENT' || x.scope === 'USER').slice(0, 25);
   if (dims.length && b1) {

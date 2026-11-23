@@ -8,7 +8,7 @@ A static web app (hosted on GitHub Pages) for auditing a client's **GTM, GA4 and
 - **No backend.** Everything runs in the browser:
   - `googletagmanager.com/gtm.js?id=…` and `gtag/js` can be fetched directly (verified: they're readable from another site in the browser).
   - Client websites can't be fetched (blocked by the browser). Page source comes from a console snippet the user pastes: `PAGE_SOURCE_SNIPPET` in `engine-web.js`.
-  - The GTM API, GA4 Admin API and GA4 Data API are called with an OAuth token from a full-page redirect sign-in (implicit flow; no popup, no Google Identity Services script). Scopes: `tagmanager.readonly`, `analytics.readonly` and `userinfo.email`. The token is kept in sessionStorage (this tab, at most an hour). The OAuth client ID is built in via `js/config.js`; Settings has an optional override.
+  - The GTM API, GA4 Admin API and GA4 Data API are called with an OAuth token from a full-page redirect sign-in (implicit flow; no popup, no Google Identity Services script). Scopes: `tagmanager.readonly`, `analytics.readonly` and `userinfo.email`, plus optional ones asked for only when a feature needs them: `dfareporting` (CM360 reports) and `webmasters.readonly` (Search Console). The token is kept in sessionStorage (this tab, at most an hour). The OAuth client ID is built in via `js/config.js`; Settings has an optional override.
   - AI calls go straight from the browser to the provider with the user's own key, stored in localStorage:
     - Anthropic, using the `anthropic-dangerous-direct-browser-access` header
     - OpenAI-compatible endpoints, with a base URL (for Azure or an internal gateway)
@@ -28,18 +28,21 @@ js/google.js        Google sign-in (popup + redirect), GTM API (lookup → live 
                     fetchGa4Full (GA4 Admin v1beta/v1alpha + Data API, PII-masked) for the GA4 audit
 js/ga4.js           GA4 audit engine (browser-only, not in Apps Script): buildGa4Result → issues, GA4 areas/score,
                     event cross-reference with GTM (ga4GtmContext reads result.audit.ga4Events/googleTags), config, data quality
+js/gsc.js           Search Console check (webmasters.readonly, optional): property found from the website (gscMatchSites),
+                    fetchGscData (totals, top pages as masked paths, sitemaps), buildGscResult (access, sitemaps/hosts,
+                    clicks vs GA4 organic sessions per site and landing page; GA4 side is data.organic from fetchGa4Full)
 js/cm360.js         CM360 check (dfareporting scope, optional): profiles/configs/activities lookups, temporary reports
                     (manual download via browserUrl: Google's file server has no CORS), CSV parsing, buildCm360Result
                     (Floodlight ↔ GTM name matching + analyst mapping, CM360 clicks vs GA4 sessions per campaign)
 js/ai.js            providers, AI_SYSTEM prompt, AI_TASKS (writeup, fixplan), aiExplainUnknownTags, aiAuditContext,
                     renderMarkdown (small, safe — escapes HTML first)
 js/app.js           STATE, views (audit, overview, summary, consent, tags, ids, live, findings, ai, settings, ga4, cm360),
-                    runFullAudit() (GTM → GA4 → CM360 with STATE.auto run sheet; pauses for CM360 connect/downloads), runAudit()
+                    runFullAudit() (GTM → GA4 → Search Console → CM360 with STATE.auto run sheet; pauses for connect/downloads), runAudit()
                     pipeline, exports (PDF via window.print + #print-report, CSV, save/open audit JSON)
 css/app.css         design tokens, light/dark, print stylesheet
 ```
 
-**Run audit** calls `runFullAudit()`: it switches to the Overview, calls `runAudit({stay:true})` (which also runs the GA4 audit), then `autoCm360Step()`. CM360 pauses at `connect` (scope redirect; `STATE.auto` is stashed and the step resumes on return) or `waiting` (manual downloads + drop zone; `finishCm360` → `autoCm360Finished`). Combined client PDF = `combinedCoverHtml` + `clientReportHtml` for the GTM, GA4 and CM360 (`cm360ClientReportModel`) models.
+**Run audit** calls `runFullAudit()`: it switches to the Overview, calls `runAudit({stay:true})` (which also runs the GA4 audit), then `autoContinue()` for the later steps (`AUTO_LATER_STEPS`: Search Console, CM360). Each has a blocker (skip reason or a missing scope); steps that need a scope pause at `connect` together and one redirect asks for all of them (`autoScopesNeeded`; `STATE.auto` is stashed and `autoContinue` resumes on return). CM360 then pauses at `waiting` (manual downloads + drop zone; `finishCm360` → `autoCm360Finished`). Combined client PDF = `combinedCoverHtml` + `clientReportHtml` for the GTM, GA4, Search Console (`gscClientReportModel`) and CM360 (`cm360ClientReportModel`) models.
 
 **`runAudit()` pipeline** (in `app.js`): the async fetch steps run first, then the synchronous engine.
 1. Read containers through the GTM API, and parse the IDs in any exports. These count as "full detail".
@@ -68,7 +71,7 @@ The concept is an "inspection report":
 
 ## Testing
 
-`npm test` runs `tests/runner.test.cjs` (local runner + static app via Playwright) and `tests/ga4.test.cjs` (GA4 audit engine on fixture Admin/Data API JSON, loaded in a `vm` context). What else was done during development:
+`npm test` runs `tests/runner.test.cjs` (local runner + static app via Playwright) `tests/ga4.test.cjs` (GA4 audit engine on fixture Admin/Data API JSON, loaded in a `vm` context), `tests/cm360.test.cjs` (CM360 CSV parsing, Floodlight capture, matching) and `tests/gsc.test.cjs` (Search Console matching and check engine). What else was done during development:
 - `npm run check` (`node --check` on every script).
 - An end-to-end Playwright run against a mocked network:
   - `gtm.js` served from a fixture compiled container, which has paused tags, trigger groups, rules, OneTrust gating and a hard-coded token

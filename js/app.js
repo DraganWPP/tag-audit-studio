@@ -24,7 +24,7 @@ function saveDraft() {
   try {
     localStorage.setItem(DRAFT_KEY, JSON.stringify({
       client: i.client, site: i.site, publicIds: i.publicIds, apiIds: i.apiIds, apiTarget: i.apiTarget, ga4: i.ga4,
-      ga4Full: i.ga4Full, cm360Auto: i.cm360Auto, rules: i.rules
+      ga4Full: i.ga4Full, cm360Auto: i.cm360Auto, gscAuto: i.gscAuto, rules: i.rules
     }));
   } catch (e) { /* ignore */ }
 }
@@ -36,7 +36,7 @@ function loadDraft() {
 
 const STATE = {
   view: 'audit',
-  inputs: Object.assign({ client: '', site: '', publicIds: '', apiIds: '', apiTarget: 'live', ga4: true, ga4Full: true, cm360Auto: true, rules: {},
+  inputs: Object.assign({ client: '', site: '', publicIds: '', apiIds: '', apiTarget: 'live', ga4: true, ga4Full: true, cm360Auto: true, gscAuto: true, rules: {},
                           exports: [], pageSource: '', live: null }, loadDraft() || {}),
   result: null,
   ai: { writeup: '', fixplan: '', chat: [], busy: '' },
@@ -49,7 +49,9 @@ const STATE = {
   // CM360 check: accounts, chosen configuration, pending reports, parsed data, analyst mapping, result
   cm360: { profiles: null, configs: {}, profileId: '', configId: '', loading: false, running: false, prep: null, files: {},
            data: null, mapping: {}, result: null, picking: false, tab: 'overview', log: [] },
-  // Automatic run (GTM → GA4 → CM360): { date, running, steps: [{ key, label, status, note }] }
+  // Search Console check: fetched data and result
+  gsc: { data: null, result: null, running: false, picking: false, tab: 'overview', log: [] },
+  // Automatic run (GTM → GA4 → Search Console → CM360): { date, running, steps: [{ key, label, status, note }] }
   auto: null,
   consentFilter: 'All',
   tagSection: 'tags',
@@ -102,7 +104,7 @@ function sevClass(s) { return esc(s === '—' ? 'Paused' : s); }
 
 const VIEWS = {
   audit: renderAudit, summary: renderSummary, consent: renderConsent, tags: renderTags, ids: renderIds,
-  live: renderLive, findings: renderFindings, ai: renderAI, settings: renderSettings, ga4: renderGa4, cm360: renderCm360,
+  live: renderLive, findings: renderFindings, ai: renderAI, settings: renderSettings, ga4: renderGa4, cm360: renderCm360, gsc: renderGsc,
   overview: renderOverview
 };
 
@@ -152,11 +154,12 @@ function updateGoogleStatus() {
 const SIGNIN_STASH_KEY = 'tas.signinStash';
 function stashForSignIn() {
   saveDraft();
-  if (!STATE.result && !STATE.ga4.result && !STATE.cm360.data && !STATE.auto) return true;
+  if (!STATE.result && !STATE.ga4.result && !STATE.cm360.data && !STATE.gsc.data && !STATE.auto) return true;
   try {
     sessionStorage.setItem(SIGNIN_STASH_KEY, JSON.stringify({
       result: STATE.result, ga4: STATE.ga4.result, ai: { writeup: STATE.ai.writeup, fixplan: STATE.ai.fixplan, chat: STATE.ai.chat },
       cm360: STATE.cm360.data ? { data: STATE.cm360.data, mapping: STATE.cm360.mapping } : null,
+      gsc: STATE.gsc.data || null,
       overrides: STATE.overrides, ga4Index: STATE.ga4.index, ga4Tab: STATE.ga4.tab,
       auto: STATE.auto ? Object.assign({}, STATE.auto, { running: false }) : null
     }));
@@ -180,6 +183,7 @@ function restoreSignInStash() {
   STATE.ai = Object.assign(STATE.ai, s.ai || {});
   STATE.overrides = s.overrides || {};
   STATE.auto = s.auto || null;
+  STATE.gsc.data = s.gsc || null;
 }
 
 function updateNav() {
@@ -564,11 +568,13 @@ function renderAudit() {
           <p class="hint">A workspace includes changes that are not live yet. Use it to review work in progress before it's published.</p>
           <label style="margin-top:10px;font-weight:400"><input type="checkbox" id="in-ga4" ${i.ga4 ? 'checked' : ''}> Check the GA4 properties behind the measurement IDs found</label>
           <label style="margin-top:6px;font-weight:400"><input type="checkbox" id="in-ga4full" ${i.ga4Full ? 'checked' : ''}> Also run the full GA4 audit for them (separate GA4 report, includes the last 28 days of data)</label>
+          <label style="margin-top:6px;font-weight:400"><input type="checkbox" id="in-gscauto" ${i.gscAuto ? 'checked' : ''}> Then run the Search Console check for the website (read only)</label>
           <label style="margin-top:6px;font-weight:400"><input type="checkbox" id="in-cm360auto" ${i.cm360Auto ? 'checked' : ''}> Then run the CM360 check if GTM has Floodlight tags</label>
           <p class="hint">${Google.hasScope(CM360_SCOPE) ? 'CM360 reports are connected.' : Google.isSignedIn()
             ? 'CM360 needs its own reports-only permission. <button class="link" data-act="cm360-connect">Connect CM360 now</button>, or the run asks for it when it gets there.'
             : 'Sign in with Google first; CM360 also needs its own reports-only permission.'}
-            The run pauses once for you to download the two CM360 reports and drop them in.</p>
+            The run pauses once for you to download the two CM360 reports and drop them in.
+            ${Google.hasScope(GSC_SCOPE) ? 'Search Console is connected.' : 'Search Console also needs its own read-only permission; the run asks for it together with CM360.'}</p>
         </div>
       </div>
 
@@ -627,7 +633,7 @@ function renderAudit() {
     el.addEventListener(prop === 'checked' ? 'change' : 'input', () => { STATE.inputs[key] = el[prop || 'value']; saveDraft(); });
   };
   bind('in-client', 'client'); bind('in-site', 'site'); bind('in-public', 'publicIds');
-  bind('in-api', 'apiIds'); bind('in-ga4', 'ga4', 'checked'); bind('in-ga4full', 'ga4Full', 'checked'); bind('in-cm360auto', 'cm360Auto', 'checked'); bind('in-page', 'pageSource'); bind('in-target', 'apiTarget');
+  bind('in-api', 'apiIds'); bind('in-ga4', 'ga4', 'checked'); bind('in-ga4full', 'ga4Full', 'checked'); bind('in-cm360auto', 'cm360Auto', 'checked'); bind('in-gscauto', 'gscAuto', 'checked'); bind('in-page', 'pageSource'); bind('in-target', 'apiTarget');
   $$('[data-rule]').forEach(el => el.addEventListener('input', () => { STATE.inputs.rules[el.dataset.rule] = el.value; saveDraft(); }));
 
   $('#in-export').addEventListener('change', async e => {
@@ -1548,20 +1554,6 @@ function renderSettings() {
     </section>
 
     <section class="form-block">
-      <h2 style="margin-top:0">Search Console test</h2>
-      <p class="hint">Checks whether this Google account can see a Search Console property for a website, and what the API returns for it.
-        Needs the extra read-only permission <code>webmasters.readonly</code> (cannot change anything) and the Search Console API enabled in the Google Cloud project.
-        The log shows counts only.</p>
-      <div class="row" style="margin-top:10px">${!Google.isSignedIn() ? googleStatusHtml() : Google.hasScope(GSC_SCOPE)
-        ? '<span class="signed">Search Console connected (read only)</span>'
-        : '<button class="btn secondary" data-act="gsc-connect">Connect Search Console</button>'}</div>
-      <label for="gsc-site" style="margin-top:12px">Website</label>
-      <div class="row"><input type="url" id="gsc-site" value="${esc(STATE.inputs.site)}" placeholder="https://www.example.co.uk" style="max-width:420px">
-        <button class="btn secondary" data-act="gsc-test" ${Google.hasScope(GSC_SCOPE) ? '' : 'disabled'}>Run Search Console test</button></div>
-      <div class="log" id="gsc-log" hidden></div>
-    </section>
-
-    <section class="form-block">
       <h2 style="margin-top:0">Appearance and data</h2>
       <div class="row">
         <label for="set-theme" style="margin:0">Theme</label>
@@ -1571,60 +1563,6 @@ function renderSettings() {
     </section>`;
   $('#set-provider').addEventListener('change', e => { saveAppSettings({ aiProvider: e.target.value, aiModel: '', aiBase: '' }); renderSettings(); });
   $('#set-theme').addEventListener('change', e => { saveAppSettings({ theme: e.target.value }); applyTheme(); });
-}
-
-/** Search Console feasibility test (Settings). Logs counts and the matched property only. */
-async function gscTest(site) {
-  const box = $('#gsc-log');
-  box.hidden = false; box.innerHTML = '';
-  const say = (msg, err) => {
-    box.insertAdjacentHTML('beforeend', '<div' + (err ? ' class="err"' : '') + '>' + esc(msg) + '</div>');
-    box.scrollTop = box.scrollHeight;
-  };
-  const fail = (step, e) => {
-    const off = /has not been used|is disabled|SERVICE_DISABLED|accessNotConfigured/i.test(e.message);
-    say('✖ ' + step + ': ' + (off ? 'the Search Console API is not enabled in the Google Cloud project. Enable "Google Search Console API" and try again.'
-      : (e.status ? 'HTTP ' + e.status + ' ' : '') + e.message), true);
-  };
-  if (site) { STATE.inputs.site = site; saveDraft(); }
-  let sites;
-  try {
-    sites = await gscSites();
-  } catch (e) { fail('Listing Search Console properties', e); return; }
-  const count = re => sites.filter(s => re.test(s.siteUrl)).length;
-  const levels = {};
-  sites.forEach(s => { levels[s.permissionLevel] = (levels[s.permissionLevel] || 0) + 1; });
-  say('✔ Search Console API works. This account can see ' + sites.length + ' propert(ies): ' + count(/^sc-domain:/) + ' Domain, ' +
-      count(/^https?:/) + ' URL prefix.');
-  say('  Access: ' + (Object.keys(levels).map(k => k + ' ' + levels[k]).join(', ') || 'none'));
-  const tags = gscVerificationTags(STATE.inputs.pageSource);
-  say(STATE.inputs.pageSource ? 'Page source on New audit: ' + tags.length + ' Search Console verification tag(s) (google-site-verification).'
-    : 'No page source on New audit, so verification tags were not checked.');
-  if (!site) { say('Enter a website to look for its property.'); return; }
-  const matches = gscMatchSites(site, sites);
-  if (!matches.length) {
-    say('✖ No property this account can see covers ' + gscHost_(site) + '. It may exist under the client\'s or another agency\'s account.', true);
-    return;
-  }
-  say('✔ ' + matches.length + ' propert(ies) cover ' + gscHost_(site) + ': ' + matches.map(m => m.siteUrl + ' (' + m.kind + ', ' + m.permissionLevel + ')').join('; '));
-  const best = matches.find(m => m.permissionLevel !== 'siteUnverifiedUser') || matches[0];
-  say('Reading ' + best.siteUrl + '…');
-  try {
-    const t = await gscQuery(best.siteUrl, [], 28);
-    const r = t.rows[0] || {};
-    say('✔ Search performance ' + t.start + ' to ' + t.end + ': ' + Math.round(r.clicks || 0) + ' clicks, ' + Math.round(r.impressions || 0) + ' impressions' +
-        (r.position ? ', average position ' + r.position.toFixed(1) : '') + '.');
-    const q = await gscQuery(best.siteUrl, ['query'], 28, 250);
-    const p = await gscQuery(best.siteUrl, ['page'], 28, 250);
-    const d = await gscQuery(best.siteUrl, ['date'], 28);
-    say('✔ Breakdowns available: ' + q.rows.length + ' queries, ' + p.rows.length + ' pages, ' + d.rows.length + ' days with data (top 250 each).');
-  } catch (e) { fail('Search performance', e); }
-  try {
-    const maps = await gscSitemaps(best.siteUrl);
-    say('✔ Sitemaps: ' + maps.length + ' submitted, ' + maps.reduce((s, m) => s + m.errors, 0) + ' error(s), ' +
-        maps.reduce((s, m) => s + m.warnings, 0) + ' warning(s), ' + maps.filter(m => m.isPending).length + ' pending.');
-  } catch (e) { fail('Sitemaps', e); }
-  say('Test finished. Nothing was changed in Search Console.');
 }
 
 function applyTheme() {
@@ -2245,6 +2183,199 @@ function exportCm360Pdf() {
 }
 
 // ══════════════════════════════════════════════════════════════════
+//  VIEW: SEARCH CONSOLE CHECK
+// ══════════════════════════════════════════════════════════════════
+
+const GSC_TABS = [['overview', 'Overview'], ['pages', 'Pages vs GA4'], ['sitemaps', 'Sitemaps'], ['coverage', 'Coverage']];
+
+function gscLog(msg, isError) {
+  const g = STATE.gsc;
+  g.log.push({ msg: msg, err: !!isError });
+  if (STATE.view === 'overview') log(msg, isError);
+  const el = $('#gsc-log');
+  if (el) {
+    el.hidden = false;
+    el.insertAdjacentHTML('beforeend', '<div' + (isError ? ' class="err"' : '') + '>' + esc(msg) + '</div>');
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+/** Organic Google sessions from the GA4 audit: the property with the most organic sessions on this host. */
+function gscGa4Context(host) {
+  const g = STATE.ga4.result;
+  if (!g || !host) return null;
+  const onSite = h => { h = String(h || '').replace(/^www\./, ''); return h === host || h.endsWith('.' + host); };
+  let best = null, bestSessions = -1;
+  g.properties.filter(p => p.organic28d).forEach(p => {
+    const s = p.organic28d.pages.filter(x => onSite(x.host)).reduce((t, x) => t + x.sessions, 0);
+    if (s > bestSessions) { best = p; bestSessions = s; }
+  });
+  return best && bestSessions > 0 ? { source: best.displayName, organic: best.organic28d } : null;
+}
+
+function computeGscResult() {
+  const g = STATE.gsc;
+  if (!g.data) { g.result = null; return; }
+  g.result = buildGscResult(g.data, gscGa4Context(g.data.host), STATE.inputs.pageSource || '',
+                            { client: STATE.inputs.client, site: g.data.site, date: g.data.date });
+  updateNav();
+}
+
+async function runGscCheck(opts) {
+  opts = opts || {};
+  const g = STATE.gsc;
+  if (g.running) return;
+  if (!Google.hasScope(GSC_SCOPE)) { toast('Connect Search Console first.', true); return; }
+  g.running = true; g.log = [];
+  if (STATE.view === 'gsc') renderGsc();
+  try {
+    g.data = await fetchGscData(STATE.inputs.site, gscLog);
+    g.picking = false; g.tab = 'overview';
+    computeGscResult();
+    const r = g.result;
+    gscLog(r.property ? 'Search Console check: grade ' + r.score.grade + ' (' + r.score.score + '/100), ' + r.issues.length + ' issue(s).'
+      : 'Search Console check: no readable property for ' + r.host + '.');
+  } catch (e) {
+    console.error(e);
+    const off = /has not been used|is disabled|SERVICE_DISABLED|accessNotConfigured/i.test(e.message);
+    gscLog('Search Console check failed: ' + (off ? 'the Search Console API is not enabled in the Google Cloud project.' : e.message), true);
+    if (!opts.stay) toast('Search Console check failed: ' + e.message, true);
+  } finally {
+    g.running = false;
+    if (STATE.view === 'gsc') renderGsc();
+  }
+}
+
+function renderGsc() {
+  const g = STATE.gsc;
+  if (g.data) computeGscResult();   // the GA4 result or page source may have changed since
+  if (!g.result || g.picking) return renderGscStart();
+  const r = g.result;
+  const counts = s => r.issues.filter(x => x.severity === s).length;
+  const num = n => n === null || n === undefined ? '—' : ga4Num_(n);
+  $('#view').innerHTML = `
+    <div class="report-head">
+      <div>
+        <h1>Search Console</h1>
+        <p class="meta">${esc(joinParts_(STATE.inputs.client, r.property ? 'Property ' + r.property : r.host, r.permission))}</p>
+        <p class="meta">${r.property ? 'Web search, ' + esc(r.start) + ' to ' + esc(r.end) : 'No readable property'} ·
+          ${r.ga4Source ? 'GA4: ' + esc(r.ga4Source) : 'GA4 not compared'}</p>
+        <div class="tally">
+          <div><strong>${counts('High')}</strong>high priority</div>
+          <div><strong>${counts('Medium')}</strong>medium</div>
+          <div><strong>${counts('Low')}</strong>low</div>
+          <div><strong>${num(r.summary.clicks)}</strong>search clicks</div>
+          <div><strong>${num(r.summary.ga4Sessions)}</strong>GA4 organic sessions</div>
+          <div><strong>${num(r.summary.impressions)}</strong>impressions</div>
+        </div>
+      </div>
+      <div class="stamp ${esc(r.score.grade)}" role="img" aria-label="Search Console grade ${esc(r.score.grade)}, score ${r.score.score} out of 100">
+        <div><b>${esc(r.score.grade)}</b><span>${r.score.score} / 100</span></div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn" data-act="gsc-pdf">Technical PDF report</button>
+      <button class="btn secondary" data-act="gsc-csv" data-kind="actions">Download actions (CSV)</button>
+      <button class="btn secondary" data-act="gsc-csv" data-kind="pages">Download pages (CSV)</button>
+      <button class="btn secondary" data-act="save">Save audit</button>
+      <button class="btn secondary" data-act="gsc-new">Run again</button>
+    </div>
+    <div class="toolbar"><div class="seg" role="group" aria-label="Search Console report section">${GSC_TABS.map(t =>
+      `<button data-act="gsc-tab" data-tab="${t[0]}" aria-pressed="${g.tab === t[0]}">${t[1]}</button>`).join('')}</div></div>
+    <div id="gsc-tab">${gscTabHtml(r, g.tab)}</div>`;
+}
+
+function gscPagesTable(r) {
+  if (!r.pages.length) return '<div class="empty">No page data.</div>';
+  return `${r.ga4Source ? '' : '<div class="notice">GA4 sessions are not shown: run the GA4 audit for this site and open this tab again.</div>'}
+    <div class="table-wrap"><table>
+    <thead><tr><th>Landing page</th><th>Search clicks</th><th>Impressions</th><th>GA4 organic sessions</th><th>Sessions per click</th></tr></thead>
+    <tbody>${r.pages.map(p => `<tr><td class="wrap"><code>${esc(p.path)}</code></td><td>${ga4Num_(p.clicks)}</td><td>${ga4Num_(p.impressions)}</td>
+      <td>${p.sessions === null ? '—' : ga4Num_(p.sessions)}</td>
+      <td>${p.ratio === null ? '—' : `<span class="sev ${p.clicks >= 20 && p.sessions === 0 ? 'Medium' : 'OK'}">${p.ratio}%</span>`}</td></tr>`).join('')}</tbody>
+    </table></div>`;
+}
+
+function gscSitemapsTable(r) {
+  if (!r.sitemaps.length) return '<div class="empty">No sitemaps submitted, or they could not be read.</div>';
+  const day = s => s ? new Date(s).toLocaleDateString() : '—';
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>Sitemap</th><th>Errors</th><th>Warnings</th><th>Last read by Google</th><th>Submitted</th></tr></thead>
+    <tbody>${r.sitemaps.map(m => `<tr><td class="wrap"><code>${esc(m.path)}</code>${m.isIndex ? '<span class="sub">Sitemap index</span>' : ''}${m.isPending ? '<span class="sub">Pending</span>' : ''}</td>
+      <td>${m.errors ? `<span class="sev Medium">${m.errors}</span>` : 0}</td><td>${m.warnings ? `<span class="sev Low">${m.warnings}</span>` : 0}</td>
+      <td>${day(m.lastDownloaded)}</td><td>${day(m.lastSubmitted)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+
+function gscTabHtml(r, tab) {
+  if (tab === 'pages') return `<p class="lede">Top landing pages from Google search (by clicks) and the organic Google sessions GA4 recorded on the same page, same 28 days.</p>${gscPagesTable(r)}`;
+  if (tab === 'sitemaps') return `<p class="lede">Sitemaps submitted in Search Console.</p>${gscSitemapsTable(r)}`;
+  if (tab === 'coverage') {
+    return `${r.coverage.map(t => `<p>${esc(t)}</p>`).join('')}
+      ${r.matches.length > 1 ? `<h3>Properties covering ${esc(r.host)}</h3><ul>${r.matches.map(m => `<li><code>${esc(m.siteUrl)}</code> · ${esc(m.kind)} · ${esc(m.permissionLevel)}</li>`).join('')}</ul>` : ''}`;
+  }
+  return `<h2>Areas</h2>${areasTable(r)}<h2>Prioritised actions</h2>${actionsTable(r)}`;
+}
+
+function renderGscStart() {
+  const g = STATE.gsc, i = STATE.inputs;
+  const signed = Google.isSignedIn(), connected = Google.hasScope(GSC_SCOPE);
+  $('#view').innerHTML = `
+    <h1>Search Console</h1>
+    <p class="lede">Finds the Search Console property for a website, checks access and sitemaps, and compares Google search clicks with the organic Google sessions in GA4, per site and per landing page. Last 28 days.</p>
+    <section class="form-block">
+      <h2 style="margin-top:0">Search Console access</h2>
+      <div class="row">${!signed ? googleStatusHtml() : connected ? '<span class="signed">Search Console connected (read only)</span>'
+        : '<button class="btn secondary" data-act="gsc-connect">Connect Search Console</button>'}</div>
+      <p class="hint">Read only: the app can view Search Console data and change nothing. Search Console has no link to GTM, so the property is found from the website.</p>
+    </section>
+    <section class="form-block">
+      <h2 style="margin-top:0">Website</h2>
+      <label for="gsc-site">Website</label>
+      <input type="url" id="gsc-site" value="${esc(i.site)}" placeholder="https://www.example.co.uk">
+      <p class="hint">${STATE.ga4.result ? 'Search clicks are compared with the GA4 audit in this session.' : 'Run the GA4 audit for this site first to compare search clicks with organic sessions.'}</p>
+    </section>
+    <div class="actions">
+      <button class="btn big" id="gsc-run-btn" data-act="gsc-run" ${connected && !g.running ? '' : 'disabled'}>${g.running ? 'Reading Search Console…' : 'Run Search Console check'}</button>
+      ${g.result ? '<button class="btn secondary" data-act="gsc-back">Back to the report</button>' : ''}
+    </div>
+    <div class="log" id="gsc-log" ${g.log.length ? '' : 'hidden'}>${g.log.map(l => '<div' + (l.err ? ' class="err"' : '') + '>' + esc(l.msg) + '</div>').join('')}</div>`;
+  const el = $('#gsc-site');
+  el.addEventListener('input', () => { STATE.inputs.site = el.value; saveDraft(); });
+}
+
+function gscFileSlug() {
+  const base = STATE.inputs.client || (STATE.gsc.result && STATE.gsc.result.host) || 'search-console';
+  return 'search-console-' + String(base).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '-' + new Date().toISOString().slice(0, 10);
+}
+
+function exportGscCsv(kind) {
+  const r = STATE.gsc.result;
+  if (kind === 'pages') {
+    download(gscFileSlug() + '-pages.csv', toCsv([['Landing page', 'Search clicks', 'Impressions', 'GA4 organic sessions', 'Sessions per click (%)']]
+      .concat(r.pages.map(p => [p.path, p.clicks, p.impressions, p.sessions === null ? '' : p.sessions, p.ratio === null ? '' : p.ratio]))), 'text/csv');
+  } else {
+    download(gscFileSlug() + '-actions.csv', toCsv([['Severity', 'Area', 'Finding', 'Action', 'Items']]
+      .concat(r.issues.map(x => [x.severity, x.area, x.finding, x.action, (x.items || []).join('; ')]))), 'text/csv');
+  }
+}
+
+function exportGscPdf() {
+  const r = STATE.gsc.result;
+  $('#print-report').className = '';
+  $('#print-report').innerHTML = `
+    <div class="page"><h1>Search Console</h1><p class="meta">${esc(joinParts_(STATE.inputs.client, r.property || r.host, r.start && r.start + ' to ' + r.end))}</p>
+      <h2>Areas</h2>${areasTable(r)}</div>
+    <div class="page"><h2>Prioritised actions</h2>${actionsTable(r)}</div>
+    <div class="page"><h2>Pages vs GA4</h2>${gscPagesTable(r)}</div>
+    <div class="page"><h2>Sitemaps</h2>${gscSitemapsTable(r)}</div>
+    <div class="page"><h2>Coverage</h2>${gscTabHtml(r, 'coverage')}</div>`;
+  const title = document.title;
+  document.title = 'Search Console - ' + gscFileSlug();
+  window.print();
+  document.title = title;
+}
+
+// ══════════════════════════════════════════════════════════════════
 //  AUTOMATIC RUN (GTM → GA4 → CM360) AND OVERVIEW
 // ══════════════════════════════════════════════════════════════════
 
@@ -2254,7 +2385,7 @@ const AUTO_STATUS = {
 };
 
 function hasOverview() {
-  return !!STATE.auto || (STATE.result ? 1 : 0) + (STATE.ga4.result ? 1 : 0) + (STATE.cm360.result ? 1 : 0) > 1;
+  return !!STATE.auto || (STATE.result ? 1 : 0) + (STATE.ga4.result ? 1 : 0) + (STATE.gsc.result ? 1 : 0) + (STATE.cm360.result ? 1 : 0) > 1;
 }
 
 function autoStep(key) { return STATE.auto ? STATE.auto.steps.find(s => s.key === key) : null; }
@@ -2291,12 +2422,15 @@ async function runFullAudit() {
   STATE.auto = { date: new Date().toISOString(), running: true, steps: [
     { key: 'gtm', label: 'GTM and consent audit', status: 'running', note: '' },
     { key: 'ga4', label: 'GA4 audit', status: 'pending', note: 'Finds the GA4 properties behind the measurement IDs in GTM' },
+    { key: 'gsc', label: 'Search Console check', status: 'pending', note: 'Finds the Search Console property for the website' },
     { key: 'cm360', label: 'CM360 check', status: 'pending', note: 'Runs when GTM has Floodlight tags' }
   ] };
   // Results of an earlier run belong to another site or another point in time
-  const oldGa4 = STATE.ga4.result, oldCm = { data: STATE.cm360.data, result: STATE.cm360.result };
+  const oldGa4 = STATE.ga4.result, oldCm = { data: STATE.cm360.data, result: STATE.cm360.result },
+        oldGsc = { data: STATE.gsc.data, result: STATE.gsc.result };
   STATE.ga4.result = null;
   Object.assign(STATE.cm360, { data: null, result: null, prep: null, files: {}, log: [], picking: false });
+  Object.assign(STATE.gsc, { data: null, result: null, log: [], picking: false });
   STATE.log = [];
   setView('overview');   // the run sheet and log show progress
   const ok = await runAudit({ stay: true });
@@ -2305,6 +2439,7 @@ async function runFullAudit() {
     STATE.auto = prev;
     if (!STATE.ga4.result) STATE.ga4.result = oldGa4;
     if (!STATE.cm360.data) Object.assign(STATE.cm360, oldCm);
+    if (!STATE.gsc.data) Object.assign(STATE.gsc, oldGsc);
     updateNav();
     setView('audit');
     return;
@@ -2321,21 +2456,77 @@ async function runFullAudit() {
   else setAutoStep('ga4', 'skipped', 'None of your GA4 properties has ' + mids.join(', '));
 
   STATE.auto.running = false;
-  await autoCm360Step();
-  const ranMore = STATE.ga4.result || ['waiting', 'connect', 'done', 'failed'].indexOf(autoStep('cm360').status) >= 0;
-  setView(ranMore ? 'overview' : 'summary');
+  await autoContinue();
+  const ranMore = STATE.ga4.result || ['gsc', 'cm360'].some(k => ['waiting', 'connect', 'done', 'failed'].indexOf(autoStep(k).status) >= 0);
+  if (STATE.view === 'overview') setView(ranMore ? 'overview' : 'summary');
 }
 
-/** The CM360 part of the automatic run. Pauses ('connect' or 'waiting') where the analyst has to act. */
-async function autoCm360Step() {
+/** Why the Search Console step cannot run yet (null when it can). */
+function autoGscBlocker() {
+  const host = gscHost_(STATE.inputs.site);
+  if (!STATE.inputs.gscAuto) return { status: 'skipped', note: 'Turned off on New audit' };
+  if (!host) return { status: 'skipped', note: 'Enter the website on New audit to find its Search Console property' };
+  if (!Google.isSignedIn()) return { status: 'skipped', note: 'Sign in with Google to run it' };
+  if (!Google.hasScope(GSC_SCOPE)) return { status: 'connect', scope: GSC_SCOPE, note: 'Connect Search Console (read only) to look for ' + host };
+  return null;
+}
+
+/** Why the CM360 step cannot run yet (null when it can). */
+function autoCm360Blocker() {
+  const srcs = cm360SrcsFromGtm();
+  if (!STATE.inputs.cm360Auto) return { status: 'skipped', note: 'Turned off on New audit' };
+  if (!srcs.length) return { status: 'skipped', note: 'GTM has no live Floodlight tags' };
+  const ids = srcs.map(s => 'DC-' + s.src).join(', ');
+  if (!Google.isSignedIn()) return { status: 'skipped', note: 'GTM sends to ' + ids + '. Sign in with Google to run it' };
+  if (!Google.hasScope(CM360_SCOPE)) return { status: 'connect', scope: CM360_SCOPE, note: 'GTM sends to ' + ids + '. Connect CM360 (reports only) to continue' };
+  return null;
+}
+
+const AUTO_LATER_STEPS = [['gsc', autoGscBlocker, autoGscRun], ['cm360', autoCm360Blocker, autoCm360Run]];
+
+/**
+ * Runs the steps after GTM and GA4. Steps that need an extra permission are asked for together
+ * (one Google round trip); the run continues by itself after the redirect.
+ */
+async function autoContinue() {
+  if (!STATE.auto) return;
+  const open = AUTO_LATER_STEPS.filter(s => autoStep(s[0]) && ['pending', 'connect'].indexOf(autoStep(s[0]).status) >= 0)
+    .map(s => ({ key: s[0], run: s[2], block: s[1]() }));
+  open.filter(s => s.block && s.block.status === 'skipped').forEach(s => setAutoStep(s.key, 'skipped', s.block.note));
+  const connect = open.filter(s => s.block && s.block.status === 'connect');
+  if (connect.length) {
+    connect.forEach(s => setAutoStep(s.key, 'connect', s.block.note));
+    open.filter(s => !s.block).forEach(s => setAutoStep(s.key, 'pending', 'Runs after the connection'));
+    return;
+  }
+  for (const s of open.filter(x => !x.block)) await s.run();
+}
+
+/** Permissions the paused steps are waiting for. */
+function autoScopesNeeded() {
+  return AUTO_LATER_STEPS.map(s => autoStep(s[0]) && autoStep(s[0]).status === 'connect' && s[1]())
+    .filter(b => b && b.scope).map(b => b.scope);
+}
+
+async function autoGscRun() {
+  STATE.auto.running = true;
+  try {
+    setAutoStep('gsc', 'running', 'Looking for the Search Console property for ' + gscHost_(STATE.inputs.site) + '…');
+    await runGscCheck({ stay: true });
+    const r = STATE.gsc.result;
+    if (!r) setAutoStep('gsc', 'failed', 'Search Console could not be read. See the log, then try again from Search Console');
+    else if (!r.property) setAutoStep('gsc', 'done', 'No Search Console property you can access covers ' + r.host);
+    else setAutoStep('gsc', 'done', r.property + ': grade ' + r.score.grade + ' (' + r.score.score + '/100), ' + r.issues.length + ' issue(s)');
+  } finally {
+    STATE.auto.running = false;
+  }
+}
+
+/** The CM360 part of the automatic run. Pauses ('waiting') for the report downloads. */
+async function autoCm360Run() {
   const c = STATE.cm360;
   const srcs = cm360SrcsFromGtm();
-  if (!autoStep('cm360')) return;
-  if (!STATE.inputs.cm360Auto) return setAutoStep('cm360', 'skipped', 'Turned off on New audit');
-  if (!srcs.length) return setAutoStep('cm360', 'skipped', 'GTM has no live Floodlight tags');
   const ids = srcs.map(s => 'DC-' + s.src).join(', ');
-  if (!Google.isSignedIn()) return setAutoStep('cm360', 'skipped', 'GTM sends to ' + ids + '. Sign in with Google to run it');
-  if (!Google.hasScope(CM360_SCOPE)) return setAutoStep('cm360', 'connect', 'GTM sends to ' + ids + '. Connect CM360 (reports only) to continue');
   STATE.auto.running = true;
   try {
     setAutoStep('cm360', 'running', 'Finding the CM360 account that owns ' + ids + '…');
@@ -2368,6 +2559,11 @@ function autoCm360Finished() {
   }
 }
 
+function autoConnectLabel() {
+  const names = autoScopesNeeded().map(sc => sc === GSC_SCOPE ? 'Search Console' : 'CM360');
+  return 'Connect ' + (names.join(' and ') || 'Google');
+}
+
 /** All reports in this session, for the Overview and the combined PDF. */
 function overviewReports() {
   const list = [];
@@ -2380,6 +2576,11 @@ function overviewReports() {
     STATE.ga4.result.properties.forEach((p, n) => list.push({ key: 'ga4-' + n, label: 'GA4: ' + p.displayName,
       sub: String(p.property).replace('properties/', 'Property ') + (p.account ? ' · ' + p.account : ''),
       score: p.score, issues: p.issues, counts: counts(p.issues), view: 'ga4', index: n }));
+  }
+  if (STATE.gsc.result) {
+    const r = STATE.gsc.result;
+    list.push({ key: 'gsc', label: 'Search Console', sub: r.property || 'No readable property for ' + r.host, score: r.score, issues: r.issues,
+      counts: counts(r.issues), view: 'gsc' });
   }
   if (STATE.cm360.result) {
     const r = STATE.cm360.result;
@@ -2403,7 +2604,7 @@ function renderOverview() {
         <span class="st-mark" aria-hidden="true"></span>
         <div><strong>${esc(s.label)}</strong> <span class="st-label">${esc(AUTO_STATUS[s.status] || s.status)}</span>
           ${s.note ? `<p class="hint">${esc(s.note)}</p>` : ''}
-          ${s.key === 'cm360' && s.status === 'connect' ? '<div class="actions"><button class="btn" data-act="cm360-connect">Connect CM360</button></div>' : ''}
+          ${s.status === 'connect' && s === a.steps.find(x => x.status === 'connect') ? `<div class="actions"><button class="btn" data-act="auto-connect">${esc(autoConnectLabel())}</button></div>` : ''}
           ${s.key === 'cm360' && s.status === 'waiting' ? cm360ManualHtml() : ''}
         </div></li>`).join('')}</ol>
     </section>` : ''}
@@ -2443,6 +2644,9 @@ function exportCombinedPdf() {
     STATE.ga4.result.properties.forEach(p =>
       reports.push({ label: 'Analytics: ' + p.displayName, model: ga4ClientReportModel(STATE.ga4.result, p) }));
   }
+  if (STATE.gsc.result && STATE.gsc.result.property) {
+    reports.push({ label: 'Google Search Console', model: gscClientReportModel(STATE.gsc.result, { client: i.client, site: i.site }) });
+  }
   if (STATE.cm360.result) {
     reports.push({ label: 'Campaign Manager 360', model: cm360ClientReportModel(STATE.cm360.result,
       { client: i.client, site: i.site, date: STATE.cm360.data && STATE.cm360.data.date }) });
@@ -2451,6 +2655,7 @@ function exportCombinedPdf() {
   const notChecked = [];
   if (!STATE.result) notChecked.push(['Tag manager & consent', 'Not part of this review.']);
   if (!STATE.ga4.result) notChecked.push(['Analytics (GA4)', 'Not part of this review.']);
+  if (!STATE.gsc.result || !STATE.gsc.result.property) notChecked.push(['Google Search Console', STATE.gsc.result ? 'No access to the site\'s Search Console property.' : 'Not part of this review.']);
   if (!STATE.cm360.result) notChecked.push(['Campaign Manager 360', 'Not part of this review.']);
   const meta = { client: i.client || hostOf_(i.site) || reports[0].model.client, site: i.site || reports[0].model.site,
                  date: new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) };
@@ -2548,6 +2753,7 @@ function saveAudit() {
   const data = {
     app: 'tag-audit-studio', v: 1, savedAt: new Date().toISOString(), ga4: STATE.ga4.result || undefined,
     cm360: STATE.cm360.data ? { data: STATE.cm360.data, mapping: STATE.cm360.mapping } : undefined,
+    gsc: STATE.gsc.data || undefined,
     inputs: STATE.inputs, result: STATE.result, ai: { writeup: STATE.ai.writeup, fixplan: STATE.ai.fixplan, chat: STATE.ai.chat },
     overrides: STATE.overrides
   };
@@ -2557,7 +2763,7 @@ function saveAudit() {
 
 function openAudit(text) {
   const d = JSON.parse(text);
-  if (d.app !== 'tag-audit-studio' || !(d.result || d.ga4 || d.cm360)) throw new Error('That file is not a saved Tag Audit Studio audit.');
+  if (d.app !== 'tag-audit-studio' || !(d.result || d.ga4 || d.cm360 || d.gsc)) throw new Error('That file is not a saved Tag Audit Studio audit.');
   STATE.inputs = Object.assign(STATE.inputs, d.inputs || {});
   STATE.result = d.result || null;
   STATE.ai = Object.assign({ writeup: '', fixplan: '', chat: [], busy: '' }, d.ai || {}, { busy: '' });
@@ -2567,9 +2773,12 @@ function openAudit(text) {
   STATE.cm360.mapping = d.cm360 && d.cm360.mapping || {};
   STATE.cm360.result = null; STATE.cm360.picking = false; STATE.cm360.tab = 'overview';
   if (STATE.cm360.data) computeCm360Result();
+  STATE.gsc.data = d.gsc || null;
+  STATE.gsc.result = null; STATE.gsc.picking = false; STATE.gsc.tab = 'overview';
+  if (STATE.gsc.data) computeGscResult();
   STATE.ga4.index = 0; STATE.ga4.tab = 'overview'; STATE.ga4.picking = false;
   updateNav();
-  setView(STATE.result ? 'summary' : STATE.ga4.result ? 'ga4' : 'cm360');
+  setView(hasOverview() ? 'overview' : STATE.result ? 'summary' : STATE.ga4.result ? 'ga4' : STATE.gsc.result ? 'gsc' : 'cm360');
   toast('Audit opened');
 }
 
@@ -2610,14 +2819,22 @@ document.addEventListener('click', async e => {
         if (!stashForSignIn()) break;
         Google.signInRedirect(googleClientId(), STATE.view, [GSC_SCOPE]);
         break;
-      case 'gsc-test':
-        el.disabled = true;
-        try { await gscTest($('#gsc-site').value); } finally { el.disabled = false; }
+      case 'auto-connect':
+        if (!stashForSignIn()) break;
+        Google.signInRedirect(googleClientId(), STATE.view, autoScopesNeeded());
         break;
+      case 'gsc-run': await runGscCheck(); break;
+      case 'gsc-new': STATE.gsc.picking = true; renderGsc(); break;
+      case 'gsc-back': STATE.gsc.picking = false; renderGsc(); break;
+      case 'gsc-tab': STATE.gsc.tab = el.dataset.tab; renderGsc(); break;
+      case 'gsc-csv': exportGscCsv(el.dataset.kind); break;
+      case 'gsc-pdf': exportGscPdf(); break;
+
       case 'pdf-combined': exportCombinedPdf(); break;
       case 'overview-open':
         if (el.dataset.view === 'ga4') { STATE.ga4.index = Number(el.dataset.index) || 0; STATE.ga4.picking = false; }
         if (el.dataset.view === 'cm360') STATE.cm360.picking = false;
+        if (el.dataset.view === 'gsc') STATE.gsc.picking = false;
         setView(el.dataset.view); break;
       case 'cm360-finish': await finishCm360(); break;
       case 'cm360-new': STATE.cm360.picking = true; renderCm360(); break;
@@ -2806,13 +3023,13 @@ if (oauthReturn) restoreSignInStash();
 updateNav();
 window.addEventListener('google-session-changed', () => {
   updateGoogleStatus();
-  if (['audit', 'ga4', 'settings', 'overview'].indexOf(STATE.view) >= 0 && !STATE.running && !STATE.ga4.running) VIEWS[STATE.view]();
+  if (['audit', 'ga4', 'gsc', 'settings', 'overview'].indexOf(STATE.view) >= 0 && !STATE.running && !STATE.ga4.running && !STATE.gsc.running) VIEWS[STATE.view]();
 });
 setView(oauthReturn ? oauthReturn.view : (location.hash || '#audit').slice(1));
 if (oauthReturn) toast(oauthReturn.error || 'Signed in to Google', !!oauthReturn.error);
 // Back from "Connect CM360" during an automatic run: carry on with the CM360 step
-if (oauthReturn && !oauthReturn.error && autoStep('cm360') && autoStep('cm360').status === 'connect' && Google.hasScope(CM360_SCOPE)) {
-  autoCm360Step();
+if (oauthReturn && !oauthReturn.error && STATE.auto && STATE.auto.steps.some(s => s.status === 'connect')) {
+  autoContinue().then(() => { if (STATE.view === 'overview') renderOverview(); });
 }
 if (Google.isSignedIn() && !Google.user) {
   Google.loadUser().then(() => window.dispatchEvent(new Event('google-session-changed')));
