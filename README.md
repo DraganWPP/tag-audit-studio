@@ -129,16 +129,17 @@ The key is stored in the browser's local storage and sent only to that provider.
 1. In [Google Cloud Console](https://console.cloud.google.com), create or choose a project.
 2. Under **APIs & Services → Library**, enable the **Tag Manager API**, the **Google Analytics Admin API** and the **Google Analytics Data API** (the Data API is used by the GA4 audit).
 3. Under **APIs & Services → OAuth consent screen**, choose **Internal** (only people in your Google Workspace can sign in), then add the scopes `…/auth/tagmanager.readonly` and `…/auth/analytics.readonly`.
-4. Under **APIs & Services → Credentials → Create credentials → OAuth client ID**, choose **Web application** and add:
-   - **Authorised JavaScript origins** (for the sign-in popup):
-     - `https://<your-org-or-user>.github.io`
-     - `http://localhost:5500` (VS Code Live Server) and/or `http://localhost:8000` (`npm start`)
-   - **Authorised redirect URIs** (for "Sign in by redirect"): the exact page address, with the trailing slash:
-     - `https://<your-org-or-user>.github.io/tag-audit-studio/`
-     - `http://localhost:5500/` and/or `http://localhost:8000/`
-5. Copy the client ID into **Settings → Google sign-in → OAuth client ID** in the app. Each user then signs in with their own Google account and sees only the containers and properties they can access. All access is read-only.
+4. Under **APIs & Services → Credentials → Create credentials → OAuth client ID**, choose **Web application** and add these **Authorised redirect URIs**. Each one is the exact page address, with the trailing slash:
+   - `https://<your-org-or-user>.github.io/tag-audit-studio/` (GitHub Pages)
+   - `http://localhost:5500/` (VS Code Live Server) and/or `http://localhost:8000/` (`npm start`)
+5. Put the client ID in [js/config.js](js/config.js) (`APP_CONFIG.googleClientId`). The client ID is not a secret, because Google shows it in every sign-in address, and it only works from the redirect URIs above. Users never need to see or paste it. **Settings → Google sign-in → Advanced** offers a per-browser override for testing another client.
 
-**If the sign-in popup closes and nothing happens** (the button stays on "Waiting for Google…"), use **"Popup not working? Sign in by redirect"** next to the Sign in button. Corporate Chrome policies and security extensions can block the way the popup hands the token back to the page; the redirect goes to Google and back in the same tab, so they don't affect it. It needs the redirect URIs above.
+**How sign-in works:**
+- There is one **Sign in with Google** control, in the left rail and in the forms that need it. It goes to Google and comes back to the same page, with no popup, so corporate Chrome policies that block popups don't affect it.
+- Each user signs in with their own Google account and sees only the containers and properties they can access. The app asks for read-only Tag Manager and Analytics access, plus the account's email address, which is used to show which account is signed in and to suggest it next time.
+- The sign-in lasts an hour. It is kept in the browser tab (sessionStorage), so reloading doesn't sign you out, and closing the tab does.
+- Audit results in memory are kept while you go to Google and back.
+- When the hour is up, the rail shows **sign in again**. With the account suggested, Google usually sends you straight back.
 
 ## Running an audit
 

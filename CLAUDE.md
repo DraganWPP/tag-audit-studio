@@ -8,7 +8,7 @@ A static web app (hosted on GitHub Pages) for auditing a client's **GTM, GA4 and
 - **No backend.** Everything runs in the browser:
   - `googletagmanager.com/gtm.js?id=…` and `gtag/js` can be fetched directly (verified: they're readable from another site in the browser).
   - Client websites can't be fetched (blocked by the browser). Page source comes from a console snippet the user pastes: `PAGE_SOURCE_SNIPPET` in `engine-web.js`.
-  - The GTM API and GA4 Admin API are called with Google Identity Services tokens, using the read-only scopes `tagmanager.readonly` and `analytics.readonly`.
+  - The GTM API, GA4 Admin API and GA4 Data API are called with an OAuth token from a full-page redirect sign-in (implicit flow; no popup, no Google Identity Services script). Scopes: `tagmanager.readonly`, `analytics.readonly` and `userinfo.email`. The token is kept in sessionStorage (this tab, at most an hour). The OAuth client ID is built in via `js/config.js`; Settings has an optional override.
   - AI calls go straight from the browser to the provider with the user's own key, stored in localStorage:
     - Anthropic, using the `anthropic-dangerous-direct-browser-access` header
     - OpenAI-compatible endpoints, with a base URL (for Azure or an internal gateway)
@@ -18,7 +18,8 @@ A static web app (hosted on GitHub Pages) for auditing a client's **GTM, GA4 and
 ## Files and data flow
 
 ```
-index.html          shell: left rail nav + #view; loads scripts in this order ↓
+index.html          shell: left rail nav + Google status (#rail-google) + #view; loads scripts in this order ↓
+js/config.js        APP_CONFIG (built-in Google OAuth client ID)
 js/engine.js        pure audit engine, extracted from apps-script/TagScanner.gs (≈150 functions/consts)
 js/engine-web.js    browser replacements: AUDIT state (let + resetAudit_), containerCache_, fetchContainer_,
                     readClientSettings_ (from WEB_SETTINGS), GA4 checks from prefetched data, live-test merge,

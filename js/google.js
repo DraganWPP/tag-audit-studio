@@ -1,13 +1,17 @@
 // ════════════════════════════════════════════════════════════════════
 //  Tag Audit Studio — Google sign-in, GTM API and GA4 Admin API
-//  Runs entirely in the browser with Google Identity Services.
-//  Read-only scopes; the access token lives in memory only.
+//  Runs entirely in the browser: OAuth redirect sign-in, read-only scopes.
+//  The access token (valid for an hour) is kept in sessionStorage, so it
+//  survives reloads in the same tab and is gone when the tab closes.
 // ════════════════════════════════════════════════════════════════════
 
 const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/tagmanager.readonly',
-  'https://www.googleapis.com/auth/analytics.readonly'
+  'https://www.googleapis.com/auth/analytics.readonly',
+  'https://www.googleapis.com/auth/userinfo.email'      // shows which account is signed in
 ].join(' ');
+const GOOGLE_SESSION_KEY = 'tas.googleSession';           // sessionStorage: { token, expires, user }
+const GOOGLE_HINT_KEY = 'tas.googleHint';                 // localStorage: last account, suggested at sign-in
 const GTM_API = 'https://tagmanager.googleapis.com/tagmanager/v2/';
 const GA4_API = 'https://analyticsadmin.googleapis.com/';
 
@@ -18,59 +22,34 @@ const Google = {
 
   isSignedIn() { return !!this.token && Date.now() < this.expires; },
 
-  /** Opens Google's consent popup and resolves with an access token. */
-  signIn(clientId) {
-    return new Promise((resolve, reject) => {
-      if (!clientId) return reject(new Error('Add your Google OAuth client ID in Settings first.'));
-      if (!window.google || !google.accounts || !google.accounts.oauth2) {
-        return reject(new Error('Google sign-in did not load. Check your connection or ad blocker and reload the page.'));
-      }
-      let settled = false, waitTimer = null;
-      const done = (fn, value) => { if (settled) return; settled = true; clearTimeout(waitTimer); fn(value); };
-      const client = google.accounts.oauth2.initTokenClient({
-        client_id: clientId,
-        scope: GOOGLE_SCOPES,
-        callback: resp => {
-          if (resp.error) {
-            return done(reject, new Error('Google sign-in failed: ' + resp.error +
-              (resp.error_description ? ' — ' + resp.error_description : '')));
-          }
-          this.token = resp.access_token;
-          this.expires = Date.now() + (Number(resp.expires_in || 3600) - 60) * 1000;
-          // If the wait already timed out, still keep the token and tell the app.
-          if (settled) window.dispatchEvent(new Event('google-signed-in'));
-          done(resolve, this.token);
-        },
-        error_callback: err => {
-          const type = err && err.type || 'unknown';
-          console.warn('[Google sign-in] error_callback', type, err);
-          if (type === 'popup_failed_to_open') {
-            return done(reject, new Error('The Google sign-in window was blocked. Allow pop-ups for ' + location.origin + ' and try again.'));
-          }
-          if (type === 'popup_closed') {
-            // Chrome can report "closed" too early because of Cross-Origin-Opener-Policy.
-            // Keep waiting for Google's answer instead of failing straight away.
-            waitTimer = setTimeout(() => done(reject, new Error(
-              'Google sign-in did not finish. If the window showed "Error 400: origin_mismatch", add ' +
-              location.origin + ' to the OAuth client\'s Authorised JavaScript origins in Google Cloud. ' +
-              'If you approved access and nothing happened, use "Sign in by redirect" instead.')), 120000);
-            return;
-          }
-          done(reject, new Error('Google sign-in failed (' + type + ').'));
-        }
-      });
-      client.requestAccessToken({ prompt: this.token ? '' : 'consent' });
-    });
+  /** Puts back a sign-in saved earlier in this tab (survives reloads and the sign-in redirect). */
+  restore() {
+    let s = null;
+    try { s = JSON.parse(sessionStorage.getItem(GOOGLE_SESSION_KEY) || 'null'); } catch (e) { /* storage blocked */ }
+    if (s && s.token && Date.now() < s.expires) {
+      this.token = s.token; this.expires = s.expires; this.user = s.user || null;
+    }
   },
+
+  persist() {
+    try {
+      if (this.token) sessionStorage.setItem(GOOGLE_SESSION_KEY, JSON.stringify({ token: this.token, expires: this.expires, user: this.user }));
+      else sessionStorage.removeItem(GOOGLE_SESSION_KEY);
+    } catch (e) { /* storage blocked: the sign-in lasts until the page reloads */ }
+  },
+
+  /** True when this tab was signed in before, but the hour-long token has run out. */
+  hasExpired() { return !this.isSignedIn() && !!this.expires; },
 
   /**
    * Full-page redirect sign-in (OAuth implicit flow). No popup and no iframe relay,
-   * so it works where corporate Chrome policies or extensions break the popup hand-off.
+   * so it works where corporate Chrome policies or extensions break popups.
    * The page URL (origin + path) must be listed under the OAuth client's
-   * "Authorised redirect URIs" in Google Cloud.
+   * "Authorised redirect URIs" in Google Cloud. Once access is approved, Google
+   * sends the user straight back; the last account used is suggested (login_hint).
    */
   signInRedirect(clientId, returnView) {
-    if (!clientId) throw new Error('Add your Google OAuth client ID in Settings first.');
+    if (!clientId) throw new Error('No Google OAuth client ID is set up. See Settings → Google sign-in.');
     const state = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
     sessionStorage.setItem('tas.oauth', JSON.stringify({ state, view: returnView || 'audit' }));
     const params = new URLSearchParams({
@@ -81,10 +60,25 @@ const Google = {
       include_granted_scopes: 'true',
       state
     });
+    let hint = '';
+    try { hint = localStorage.getItem(GOOGLE_HINT_KEY) || ''; } catch (e) { /* ignore */ }
+    if (hint) params.set('login_hint', hint);
     location.assign('https://accounts.google.com/o/oauth2/v2/auth?' + params);
   },
 
-  redirectUri() { return location.origin + location.pathname; },
+  /** Reads the signed-in account's email (for display and login_hint). Never fails the caller. */
+  async loadUser() {
+    try {
+      const u = await this.get('https://www.googleapis.com/oauth2/v3/userinfo');
+      this.user = u.email || null;
+      this.persist();
+      if (this.user) { try { localStorage.setItem(GOOGLE_HINT_KEY, this.user); } catch (e) { /* ignore */ } }
+    } catch (e) { /* the email scope may not be granted yet */ }
+    return this.user;
+  },
+
+  /** The page's folder address: …/index.html and … both return to …/, so one registered URI covers both. */
+  redirectUri() { return location.origin + location.pathname.replace(/index\.html$/i, ''); },
 
   /**
    * Called once at start-up. Reads the token Google put in the URL fragment after a
@@ -104,14 +98,19 @@ const Google = {
     if (p.get('error')) return { view, error: 'Google sign-in failed: ' + p.get('error') };
     this.token = p.get('access_token');
     this.expires = Date.now() + (Number(p.get('expires_in') || 3600) - 60) * 1000;
+    this.user = null;
+    this.persist();
     return { view };
   },
 
+  /** Ends the sign-in in this tab and asks Google to revoke the token. */
   signOut() {
-    if (this.token && window.google && google.accounts && google.accounts.oauth2) {
-      google.accounts.oauth2.revoke(this.token, () => {});
+    if (this.token) {
+      fetch('https://oauth2.googleapis.com/revoke?token=' + encodeURIComponent(this.token), { method: 'POST', mode: 'no-cors' }).catch(() => {});
     }
-    this.token = null; this.expires = 0;
+    this.token = null; this.expires = 0; this.user = null;
+    this.persist();
+    try { localStorage.removeItem(GOOGLE_HINT_KEY); } catch (e) { /* ignore */ }
   },
 
   /** GET with retries on rate limits. */
@@ -133,6 +132,11 @@ const Google = {
       if ((res.status === 429 || res.status >= 500) && attempt < 4) {
         await new Promise(r => setTimeout(r, 1500 * Math.pow(2, attempt)));
         continue;
+      }
+      if (res.status === 401) {               // token revoked or expired early: show "sign in again"
+        this.token = null;
+        this.persist();
+        window.dispatchEvent(new Event('google-session-changed'));
       }
       const err = new Error(googleErrorMessage_(res.status, body));
       err.status = res.status;
@@ -428,6 +432,24 @@ async function fetchGa4PropertyData(mid, progress, hints, force) {
     keyEvents: (keys || []).map(k => k.eventName),
     adsLinks: adsLinks === null ? null : adsLinks.length,
     bigQuery: bq === null ? null : bq.length
+  };
+}
+
+/**
+ * The GTM report's GA4 property checks need a small subset of the full GA4 read.
+ * Same shape as fetchGa4PropertyData(), so one read per property serves both reports.
+ */
+function ga4PropertyDataFromFull(full, prop) {
+  const a = full.admin || {};
+  const p = a.property || {};
+  return {
+    displayName: full.displayName || prop.displayName, account: full.account || prop.account, streams: (a.streams || []).length,
+    property: { timeZone: p.timeZone, currencyCode: p.currencyCode },
+    retention: a.retention && a.retention.eventDataRetention || null,
+    customDimensions: (a.customDimensions || []).map(x => ({ parameterName: x.parameterName, scope: x.scope })),
+    keyEvents: (a.keyEvents || []).map(k => k.eventName),
+    adsLinks: a.adsLinks === null || a.adsLinks === undefined ? null : a.adsLinks.length,
+    bigQuery: a.bigQueryLinks === null || a.bigQueryLinks === undefined ? null : a.bigQueryLinks.length
   };
 }
 
