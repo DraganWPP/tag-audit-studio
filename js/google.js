@@ -14,13 +14,21 @@ const GOOGLE_SCOPES = [
 const CM360_SCOPE = 'https://www.googleapis.com/auth/dfareporting';   // CM360 reports (no campaign/Floodlight edits)
 const GSC_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';   // Search Console, read only
 const ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';   // Google Ads (no read-only scope exists; the app only reads)
-const GOOGLE_OPTIONAL_SCOPES = [CM360_SCOPE, GSC_SCOPE, ADS_SCOPE];
+const GOOGLE_OPTIONAL_SCOPES = [CM360_SCOPE, GSC_SCOPE];
 const GOOGLE_SESSION_KEY = 'tas.googleSession';           // sessionStorage: { token, expires, user }
 const GOOGLE_HINT_KEY = 'tas.googleHint';                 // localStorage: last account, suggested at sign-in
+const EMAIL_SCOPE = 'https://www.googleapis.com/auth/userinfo.email';
 const GTM_API = 'https://tagmanager.googleapis.com/tagmanager/v2/';
 const GA4_API = 'https://analyticsadmin.googleapis.com/';
 
-const Google = {
+/**
+ * One Google sign-in. The app keeps two, so GA4/GTM and Google Ads can use different Google accounts:
+ *  Google     GTM, GA4, Search Console and CM360
+ *  GoogleAds  Google Ads only (its own account, token and sign-out)
+ */
+function createGoogleSession(cfg) {
+  return {
+  cfg: cfg,
   token: null,
   expires: 0,
   user: null,
@@ -30,7 +38,7 @@ const Google = {
   /** Puts back a sign-in saved earlier in this tab (survives reloads and the sign-in redirect). */
   restore() {
     let s = null;
-    try { s = JSON.parse(sessionStorage.getItem(GOOGLE_SESSION_KEY) || 'null'); } catch (e) { /* storage blocked */ }
+    try { s = JSON.parse(sessionStorage.getItem(this.cfg.sessionKey) || 'null'); } catch (e) { /* storage blocked */ }
     if (s && s.token && Date.now() < s.expires) {
       this.token = s.token; this.expires = s.expires; this.user = s.user || null; this.scopes = s.scopes || [];
     }
@@ -41,8 +49,8 @@ const Google = {
 
   persist() {
     try {
-      if (this.token) sessionStorage.setItem(GOOGLE_SESSION_KEY, JSON.stringify({ token: this.token, expires: this.expires, user: this.user, scopes: this.scopes || [] }));
-      else sessionStorage.removeItem(GOOGLE_SESSION_KEY);
+      if (this.token) sessionStorage.setItem(this.cfg.sessionKey, JSON.stringify({ token: this.token, expires: this.expires, user: this.user, scopes: this.scopes || [] }));
+      else sessionStorage.removeItem(this.cfg.sessionKey);
     } catch (e) { /* storage blocked: the sign-in lasts until the page reloads */ }
   },
 
@@ -59,19 +67,21 @@ const Google = {
   signInRedirect(clientId, returnView, extraScopes) {
     if (!clientId) throw new Error('No Google OAuth client ID is set up. See Settings → Google sign-in.');
     const state = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
-    sessionStorage.setItem('tas.oauth', JSON.stringify({ state, view: returnView || 'audit' }));
+    sessionStorage.setItem('tas.oauth', JSON.stringify({ state, view: returnView || 'audit', session: this.cfg.name }));
     const params = new URLSearchParams({
       client_id: clientId,
       redirect_uri: this.redirectUri(),
       response_type: 'token',
       // Extra permissions (CM360) are only requested when a feature asks for them; keep any granted earlier this tab
-      scope: [GOOGLE_SCOPES].concat(extraScopes || [], (this.scopes || []).filter(s => GOOGLE_OPTIONAL_SCOPES.indexOf(s) >= 0)).join(' '),
+      scope: [this.cfg.scopes].concat(extraScopes || [], (this.scopes || []).filter(s => this.cfg.optional.indexOf(s) >= 0)).join(' '),
       include_granted_scopes: 'true',
       state
     });
     let hint = '';
-    try { hint = localStorage.getItem(GOOGLE_HINT_KEY) || ''; } catch (e) { /* ignore */ }
+    try { hint = localStorage.getItem(this.cfg.hintKey) || ''; } catch (e) { /* ignore */ }
     if (hint) params.set('login_hint', hint);
+    // The Google Ads sign-in may use a different Google account: always let the user choose
+    if (this.cfg.chooseAccount && !this.isSignedIn()) params.set('prompt', 'select_account');
     location.assign('https://accounts.google.com/o/oauth2/v2/auth?' + params);
   },
 
@@ -81,7 +91,7 @@ const Google = {
       const u = await this.get('https://www.googleapis.com/oauth2/v3/userinfo');
       this.user = u.email || null;
       this.persist();
-      if (this.user) { try { localStorage.setItem(GOOGLE_HINT_KEY, this.user); } catch (e) { /* ignore */ } }
+      if (this.user) { try { localStorage.setItem(this.cfg.hintKey, this.user); } catch (e) { /* ignore */ } }
     } catch (e) { /* the email scope may not be granted yet */ }
     return this.user;
   },
@@ -91,8 +101,9 @@ const Google = {
 
   /**
    * Called once at start-up. Reads the token Google put in the URL fragment after a
-   * redirect sign-in, then removes it from the address bar and history.
-   * Returns null when this load is not a sign-in return, else { view } or { view, error }.
+   * redirect sign-in, then removes it from the address bar and history. The token goes to
+   * the session that started the sign-in (main or Google Ads).
+   * Returns null when this load is not a sign-in return, else { view, session } or { view, error }.
    */
   consumeRedirect() {
     const hash = location.hash.slice(1);
@@ -105,12 +116,13 @@ const Google = {
     const view = saved && saved.view || 'audit';
     if (!saved || p.get('state') !== saved.state) return { view, error: 'Google sign-in could not be verified (state mismatch). Try again.' };
     if (p.get('error')) return { view, error: 'Google sign-in failed: ' + p.get('error') };
-    this.token = p.get('access_token');
-    this.expires = Date.now() + (Number(p.get('expires_in') || 3600) - 60) * 1000;
-    this.user = null;
-    this.scopes = (p.get('scope') || '').split(/\s+/).filter(Boolean);
-    this.persist();
-    return { view };
+    const target = saved.session === 'ads' ? GoogleAds : Google;
+    target.token = p.get('access_token');
+    target.expires = Date.now() + (Number(p.get('expires_in') || 3600) - 60) * 1000;
+    target.user = null;
+    target.scopes = (p.get('scope') || '').split(/\s+/).filter(Boolean);
+    target.persist();
+    return { view, session: target.cfg.name };
   },
 
   /** Ends the sign-in in this tab and asks Google to revoke the token. */
@@ -120,7 +132,7 @@ const Google = {
     }
     this.token = null; this.expires = 0; this.user = null; this.scopes = [];
     this.persist();
-    try { localStorage.removeItem(GOOGLE_HINT_KEY); } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(this.cfg.hintKey); } catch (e) { /* ignore */ }
   },
 
   /** GET with retries on rate limits. */
@@ -168,7 +180,13 @@ const Google = {
     } while (token);
     return out;
   }
-};
+  };
+}
+
+const Google = createGoogleSession({ name: 'main', sessionKey: GOOGLE_SESSION_KEY, hintKey: GOOGLE_HINT_KEY,
+                                     scopes: GOOGLE_SCOPES, optional: GOOGLE_OPTIONAL_SCOPES });
+const GoogleAds = createGoogleSession({ name: 'ads', sessionKey: 'tas.googleSession.ads', hintKey: 'tas.googleHint.ads',
+                                        scopes: EMAIL_SCOPE, optional: [ADS_SCOPE], chooseAccount: true });
 
 function googleErrorMessage_(status, body) {
   let msg = '';

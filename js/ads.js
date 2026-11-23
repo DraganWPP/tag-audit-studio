@@ -4,6 +4,8 @@
 //  Google Ads has no read-only permission. This app only ever calls the read endpoints
 //  (listAccessibleCustomers and googleAds:search with GAQL SELECT queries); what an analyst
 //  could change is limited by their own role in each Google Ads account.
+//  Google Ads uses its own sign-in (GoogleAds in google.js), so it can be a different Google account
+//  from the one used for GTM and GA4.
 //  Every call needs the agency's developer token (from the manager account's API Center),
 //  entered in Settings and kept in this browser only.
 // ════════════════════════════════════════════════════════════════════
@@ -26,7 +28,7 @@ async function adsFetch_(path, opt, init, loginId) {
   let last;
   for (const v of versions) {
     try {
-      const res = await Google.request('https://googleads.googleapis.com/' + v + '/' + path,
+      const res = await GoogleAds.request('https://googleads.googleapis.com/' + v + '/' + path,
         Object.assign({}, init || {}, { headers: Object.assign({}, (init || {}).headers || {}, adsHeaders_(opt, loginId)) }));
       adsVersion_ = v;
       return res;

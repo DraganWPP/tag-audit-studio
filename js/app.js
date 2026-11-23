@@ -141,10 +141,23 @@ function googleStatusHtml() {
 function updateGoogleStatus() {
   const el = $('#rail-google');
   if (!el) return;
-  el.innerHTML = Google.isSignedIn()
+  el.innerHTML = (Google.isSignedIn()
     ? `<span class="rail-signed" title="${esc(Google.user || 'Signed in to Google')}">Google: ${esc(Google.user || 'signed in')}</span>
        <button class="link" data-act="signout">Sign out</button>`
-    : `<button class="link" data-act="signin">${Google.hasExpired() ? 'Google sign-in expired: sign in again' : 'Sign in with Google'}</button>`;
+    : `<button class="link" data-act="signin">${Google.hasExpired() ? 'Google sign-in expired: sign in again' : 'Sign in with Google'}</button>`) +
+    (GoogleAds.isSignedIn()
+      ? `<span class="rail-signed" title="${esc(GoogleAds.user || 'Signed in to Google Ads')}">Google Ads: ${esc(GoogleAds.user || 'signed in')}</span>
+         <button class="link" data-act="ads-signout">Sign out of Google Ads</button>` : '');
+}
+
+/** The Google Ads sign-in control (a separate Google account is allowed). */
+function adsStatusHtml() {
+  if (GoogleAds.hasScope(ADS_SCOPE)) {
+    return `<span class="signed">Google Ads: signed in${GoogleAds.user ? ' as <span class="account">' + esc(GoogleAds.user) + '</span>' : ''}</span>
+      <button class="link" data-act="ads-signout">Sign out</button>`;
+  }
+  return (GoogleAds.hasExpired() ? '<span class="hint" style="margin:0">The Google Ads sign-in has expired (it lasts an hour).</span> ' : '') +
+    '<button class="btn secondary" data-act="ads-connect">Sign in for Google Ads</button>';
 }
 
 /**
@@ -1564,12 +1577,11 @@ function renderSettings() {
         <div><label for="ads-login">Manager account ID (optional)</label><input type="text" id="ads-login" value="${esc(s.adsLoginId || '')}" placeholder="123-456-7890">
           <p class="hint">The MCC you reach client accounts through. Leave empty to use every manager account you can access.</p></div>
       </div>
-      <div class="row" style="margin-top:10px">${!Google.isSignedIn() ? googleStatusHtml() : Google.hasScope(ADS_SCOPE)
-        ? '<span class="signed">Google Ads connected</span>'
-        : '<button class="btn secondary" data-act="ads-connect">Connect Google Ads</button>'}</div>
+      <div class="row" style="margin-top:10px">${adsStatusHtml()}</div>
+      <p class="hint">Google Ads has its own sign-in, so you can use a different Google account from the one for GTM and GA4.</p>
       <label for="ads-aw" style="margin-top:12px">Google Ads conversion ID to find</label>
       <div class="row"><input type="text" id="ads-aw" value="${esc(adsIdsFromGtm()[0] || '')}" placeholder="AW-123456789" style="max-width:260px">
-        <button class="btn secondary" data-act="ads-test" ${Google.hasScope(ADS_SCOPE) ? '' : 'disabled'}>Run Google Ads test</button></div>
+        <button class="btn secondary" data-act="ads-test" ${GoogleAds.hasScope(ADS_SCOPE) ? '' : 'disabled'}>Run Google Ads test</button></div>
       ${adsIdsFromGtm().length ? '<p class="hint">From the GTM audit: ' + adsIdsFromGtm().map(esc).join(', ') + '</p>' : ''}
       <div class="log" id="ads-log" hidden></div>
     </section>
@@ -2959,8 +2971,9 @@ document.addEventListener('click', async e => {
       case 'ads-connect':
         saveAppSettings({ adsDevToken: $('#ads-token').value.trim(), adsLoginId: $('#ads-login').value.trim() });
         if (!stashForSignIn()) break;
-        Google.signInRedirect(googleClientId(), STATE.view, [ADS_SCOPE]);
+        GoogleAds.signInRedirect(googleClientId(), STATE.view, [ADS_SCOPE]);
         break;
+      case 'ads-signout': GoogleAds.signOut(); toast('Signed out of Google Ads'); VIEWS[STATE.view](); updateGoogleStatus(); break;
       case 'ads-test':
         saveAppSettings({ adsDevToken: $('#ads-token').value.trim(), adsLoginId: $('#ads-login').value.trim() });
         el.disabled = true;
@@ -3090,7 +3103,7 @@ document.addEventListener('click', async e => {
         renderSettings(); updateGoogleStatus(); break;
       }
       case 'clear-data':
-        ['tas.settings', 'tas.draft', 'tas.gtmPaths', 'tas.ga4Streams', 'tas.ga4Misses', 'tas.googleHint'].forEach(k => { try { localStorage.removeItem(k); } catch (x) { /* ignore */ } });
+        ['tas.settings', 'tas.draft', 'tas.gtmPaths', 'tas.ga4Streams', 'tas.ga4Misses', 'tas.googleHint', 'tas.googleHint.ads'].forEach(k => { try { localStorage.removeItem(k); } catch (x) { /* ignore */ } });
         try { sessionStorage.removeItem('tas.ga4Props'); } catch (x) { /* ignore */ }
         STATE.caches = { containers: {}, api: {}, ga4: {}, gtag: {}, ga4full: {} };
         toast('Saved settings and caches cleared'); renderSettings(); break;
@@ -3169,6 +3182,7 @@ $('#open-audit-file').addEventListener('change', async e => {
 // ── Start ───────────────────────────────────────────────────────────
 applyTheme();
 Google.restore();
+GoogleAds.restore();
 const oauthReturn = Google.consumeRedirect();
 if (oauthReturn) restoreSignInStash();
 updateNav();
@@ -3177,11 +3191,11 @@ window.addEventListener('google-session-changed', () => {
   if (['audit', 'ga4', 'gsc', 'settings', 'overview'].indexOf(STATE.view) >= 0 && !STATE.running && !STATE.ga4.running && !STATE.gsc.running) VIEWS[STATE.view]();
 });
 setView(oauthReturn ? oauthReturn.view : (location.hash || '#audit').slice(1));
-if (oauthReturn) toast(oauthReturn.error || 'Signed in to Google', !!oauthReturn.error);
+if (oauthReturn) toast(oauthReturn.error || (oauthReturn.session === 'ads' ? 'Signed in for Google Ads' : 'Signed in to Google'), !!oauthReturn.error);
 // Back from "Connect CM360" during an automatic run: carry on with the CM360 step
 if (oauthReturn && !oauthReturn.error && STATE.auto && STATE.auto.steps.some(s => s.status === 'connect')) {
   autoContinue().then(() => { if (STATE.view === 'overview') renderOverview(); });
 }
-if (Google.isSignedIn() && !Google.user) {
-  Google.loadUser().then(() => window.dispatchEvent(new Event('google-session-changed')));
-}
+[Google, GoogleAds].forEach(s => {
+  if (s.isSignedIn() && !s.user) s.loadUser().then(() => window.dispatchEvent(new Event('google-session-changed')));
+});
