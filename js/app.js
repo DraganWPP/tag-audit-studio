@@ -1521,6 +1521,17 @@ function renderSettings() {
     </section>
 
     <section class="form-block">
+      <h2 style="margin-top:0">Campaign Manager 360 (connection test)</h2>
+      <p class="hint">Checks whether this app can read CM360 reports for your account: it lists your CM360 profiles and Floodlight configurations,
+        then creates a small temporary report (campaigns, impressions, clicks, last 7 days), downloads it and deletes it. Only counts are shown.
+        The permission is reports only: it cannot change campaigns, ads or Floodlight.</p>
+      <div class="actions">${!Google.isSignedIn() ? '<span class="hint" style="margin:0">Sign in with Google first.</span>'
+        : Google.hasScope(CM360_SCOPE) ? '<button class="btn secondary" data-act="cm360-test">Run CM360 connection test</button>'
+        : '<button class="btn secondary" data-act="cm360-connect">Connect CM360 (adds the reports permission)</button>'}</div>
+      <div class="log" id="cm360-log" hidden></div>
+    </section>
+
+    <section class="form-block">
       <h2 style="margin-top:0">Appearance and data</h2>
       <div class="row">
         <label for="set-theme" style="margin:0">Theme</label>
@@ -1940,6 +1951,27 @@ document.addEventListener('click', async e => {
       case 'signin-redirect': {
         if (!stashForSignIn()) break;
         Google.signInRedirect(googleClientId(), STATE.view);
+        break;
+      }
+      case 'cm360-connect':
+        if (!stashForSignIn()) break;
+        Google.signInRedirect(googleClientId(), STATE.view, [CM360_SCOPE]);
+        break;
+      case 'cm360-test': {
+        const box = $('#cm360-log');
+        box.hidden = false; box.innerHTML = '';
+        const out = (msg, isErr) => {
+          box.insertAdjacentHTML('beforeend', '<div' + (isErr ? ' class="err"' : '') + '>' + esc(msg) + '</div>');
+          box.scrollTop = box.scrollHeight;
+        };
+        el.disabled = true; el.textContent = 'Testing…';
+        try {
+          const s = await cm360ConnectionTest(out);
+          out(s.download ? 'Result: CM360 reports can be read from the browser. The full CM360 feature is feasible.'
+                         : 'Result: see the failed step above.', !s.download);
+        } catch (e) {
+          out('Result: the test stopped at the step above.', true);
+        } finally { el.disabled = false; el.textContent = 'Run CM360 connection test'; }
         break;
       }
       case 'ga4-run': await runGa4Audit(); break;

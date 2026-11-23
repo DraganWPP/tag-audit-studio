@@ -10,6 +10,9 @@ const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/analytics.readonly',
   'https://www.googleapis.com/auth/userinfo.email'      // shows which account is signed in
 ].join(' ');
+// Optional permissions, requested only when the user turns on a feature that needs them
+const CM360_SCOPE = 'https://www.googleapis.com/auth/dfareporting';   // CM360 reports (no campaign/Floodlight edits)
+const GOOGLE_OPTIONAL_SCOPES = [CM360_SCOPE];
 const GOOGLE_SESSION_KEY = 'tas.googleSession';           // sessionStorage: { token, expires, user }
 const GOOGLE_HINT_KEY = 'tas.googleHint';                 // localStorage: last account, suggested at sign-in
 const GTM_API = 'https://tagmanager.googleapis.com/tagmanager/v2/';
@@ -27,13 +30,16 @@ const Google = {
     let s = null;
     try { s = JSON.parse(sessionStorage.getItem(GOOGLE_SESSION_KEY) || 'null'); } catch (e) { /* storage blocked */ }
     if (s && s.token && Date.now() < s.expires) {
-      this.token = s.token; this.expires = s.expires; this.user = s.user || null;
+      this.token = s.token; this.expires = s.expires; this.user = s.user || null; this.scopes = s.scopes || [];
     }
   },
 
+  /** True when the current sign-in includes this permission (e.g. CM360 reporting). */
+  hasScope(scope) { return this.isSignedIn() && (this.scopes || []).indexOf(scope) >= 0; },
+
   persist() {
     try {
-      if (this.token) sessionStorage.setItem(GOOGLE_SESSION_KEY, JSON.stringify({ token: this.token, expires: this.expires, user: this.user }));
+      if (this.token) sessionStorage.setItem(GOOGLE_SESSION_KEY, JSON.stringify({ token: this.token, expires: this.expires, user: this.user, scopes: this.scopes || [] }));
       else sessionStorage.removeItem(GOOGLE_SESSION_KEY);
     } catch (e) { /* storage blocked: the sign-in lasts until the page reloads */ }
   },
@@ -48,7 +54,7 @@ const Google = {
    * "Authorised redirect URIs" in Google Cloud. Once access is approved, Google
    * sends the user straight back; the last account used is suggested (login_hint).
    */
-  signInRedirect(clientId, returnView) {
+  signInRedirect(clientId, returnView, extraScopes) {
     if (!clientId) throw new Error('No Google OAuth client ID is set up. See Settings → Google sign-in.');
     const state = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
     sessionStorage.setItem('tas.oauth', JSON.stringify({ state, view: returnView || 'audit' }));
@@ -56,7 +62,8 @@ const Google = {
       client_id: clientId,
       redirect_uri: this.redirectUri(),
       response_type: 'token',
-      scope: GOOGLE_SCOPES,
+      // Extra permissions (CM360) are only requested when a feature asks for them; keep any granted earlier this tab
+      scope: [GOOGLE_SCOPES].concat(extraScopes || [], (this.scopes || []).filter(s => GOOGLE_OPTIONAL_SCOPES.indexOf(s) >= 0)).join(' '),
       include_granted_scopes: 'true',
       state
     });
@@ -99,6 +106,7 @@ const Google = {
     this.token = p.get('access_token');
     this.expires = Date.now() + (Number(p.get('expires_in') || 3600) - 60) * 1000;
     this.user = null;
+    this.scopes = (p.get('scope') || '').split(/\s+/).filter(Boolean);
     this.persist();
     return { view };
   },
@@ -108,7 +116,7 @@ const Google = {
     if (this.token) {
       fetch('https://oauth2.googleapis.com/revoke?token=' + encodeURIComponent(this.token), { method: 'POST', mode: 'no-cors' }).catch(() => {});
     }
-    this.token = null; this.expires = 0; this.user = null;
+    this.token = null; this.expires = 0; this.user = null; this.scopes = [];
     this.persist();
     try { localStorage.removeItem(GOOGLE_HINT_KEY); } catch (e) { /* ignore */ }
   },
@@ -127,7 +135,10 @@ const Google = {
     for (let attempt = 0; ; attempt++) {
       const res = await fetch(url, Object.assign({}, init,
         { headers: Object.assign({ Authorization: 'Bearer ' + this.token }, init.headers || {}) }));
-      if (res.ok) return res.json();
+      if (res.ok) {
+        const text = await res.text();           // DELETE and some POSTs return no body
+        return text ? JSON.parse(text) : {};
+      }
       const body = await res.text();
       if ((res.status === 429 || res.status >= 500) && attempt < 4) {
         await new Promise(r => setTimeout(r, 1500 * Math.pow(2, attempt)));
