@@ -13,7 +13,8 @@ const GOOGLE_SCOPES = [
 // Optional permissions, requested only when the user turns on a feature that needs them
 const CM360_SCOPE = 'https://www.googleapis.com/auth/dfareporting';   // CM360 reports (no campaign/Floodlight edits)
 const GSC_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';   // Search Console, read only
-const GOOGLE_OPTIONAL_SCOPES = [CM360_SCOPE, GSC_SCOPE];
+const ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';   // Google Ads (no read-only scope exists; the app only reads)
+const GOOGLE_OPTIONAL_SCOPES = [CM360_SCOPE, GSC_SCOPE, ADS_SCOPE];
 const GOOGLE_SESSION_KEY = 'tas.googleSession';           // sessionStorage: { token, expires, user }
 const GOOGLE_HINT_KEY = 'tas.googleHint';                 // localStorage: last account, suggested at sign-in
 const GTM_API = 'https://tagmanager.googleapis.com/tagmanager/v2/';
@@ -171,7 +172,14 @@ const Google = {
 
 function googleErrorMessage_(status, body) {
   let msg = '';
-  try { msg = JSON.parse(body).error.message; } catch (e) { msg = body.slice(0, 200); }
+  try {
+    const err = JSON.parse(body).error;
+    msg = err.message;
+    // Google Ads puts the specific reason in details[].errors[] (e.g. DEVELOPER_TOKEN_NOT_APPROVED)
+    const codes = [].concat(...(err.details || []).map(d => (d.errors || []).map(x =>
+      Object.keys(x.errorCode || {}).map(k => k + '.' + x.errorCode[k]).join(', ') + (x.message ? ' (' + x.message + ')' : ''))));
+    if (codes.length) msg += ' [' + codes.slice(0, 3).join('; ') + ']';
+  } catch (e) { msg = body.slice(0, 200); }
   if (status === 403 && /has not been used|is disabled/i.test(msg)) {
     return 'This API is not enabled in your Google Cloud project. Enable the Tag Manager API, the Google Analytics Admin API ' +
       'and the Google Analytics Data API (see README). Details: ' + msg;
