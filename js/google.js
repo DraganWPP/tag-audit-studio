@@ -77,7 +77,8 @@ const Google = {
     return this.user;
   },
 
-  redirectUri() { return location.origin + location.pathname; },
+  /** The page's folder address: …/index.html and … both return to …/, so one registered URI covers both. */
+  redirectUri() { return location.origin + location.pathname.replace(/index\.html$/i, ''); },
 
   /**
    * Called once at start-up. Reads the token Google put in the URL fragment after a
