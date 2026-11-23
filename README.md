@@ -171,6 +171,32 @@ The key is stored in the browser's local storage and sent only to that provider.
   - **Save audit** includes the GA4 report
 - **Not readable with read-only access, so listed as manual checks:** internal traffic and data filters, unwanted referrals, cross-domain domains, session timeout, user access and change history. Some settings come from Google's alpha Admin API and can be unavailable for some properties; the Coverage tab lists anything that couldn't be read.
 
+## CM360 check (Floodlight and delivery)
+
+**CM360 check** in the left rail compares Campaign Manager 360 with the GTM and GA4 audits from the same session, using the last 30 days.
+
+**Setup:**
+- Enable the **Campaign Manager 360 API** in the Google Cloud project.
+- Each user needs a CM360 user profile with API access in the advertiser's CM360 account.
+
+**Access:**
+- **Connect CM360** asks for one extra permission, `dfareporting` (reports only), only when someone uses this check.
+- The app can create, run and delete its own temporary reports. It cannot change campaigns, ads or Floodlight.
+
+**How it runs:**
+1. The app picks the CM360 account and Floodlight configuration that GTM's Floodlight tags send to. You can change both.
+2. It runs two temporary reports: Floodlight conversions per activity, and impressions and clicks per campaign for the advertiser.
+3. Google doesn't let browsers download report files directly. **Download** each report with one click (Google's own link, using your browser's Google sign-in), then **add both CSV files** back.
+4. The files are read in the browser. Only counts per activity and campaign are kept, and both reports are then deleted from CM360. Reports left behind, for example if the tab was closed, are deleted on the next run.
+
+**What it checks:**
+- Floodlight configurations in GTM that none of your CM360 accounts can see (another advertiser, a previous agency or a test setup).
+- GTM Floodlight tags whose activity recorded no conversions.
+- Activities that record conversions but have no tag in the container.
+- CM360 clicks compared with GA4 sessions per campaign: campaigns with no GA4 sessions, or fewer than half as many sessions as clicks. This needs the GA4 audit for the same site. Search campaigns are left out.
+
+**Matching:** with reports-only access, CM360 doesn't return the activities' tag strings (`type`/`cat`). GTM tags are therefore matched to activities by name. Confirm or correct each match in the **Floodlight mapping** tab; your choices are saved with the audit.
+
 ### Optional local browser runner
 
 The [local GTM-guided runner](runner/README.md) reads a GTM export and opens

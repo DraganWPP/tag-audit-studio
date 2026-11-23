@@ -28,6 +28,9 @@ js/google.js        Google sign-in (popup + redirect), GTM API (lookup → live 
                     fetchGa4Full (GA4 Admin v1beta/v1alpha + Data API, PII-masked) for the GA4 audit
 js/ga4.js           GA4 audit engine (browser-only, not in Apps Script): buildGa4Result → issues, GA4 areas/score,
                     event cross-reference with GTM (ga4GtmContext reads result.audit.ga4Events/googleTags), config, data quality
+js/cm360.js         CM360 check (dfareporting scope, optional): profiles/configs/activities lookups, temporary reports
+                    (manual download via browserUrl: Google's file server has no CORS), CSV parsing, buildCm360Result
+                    (Floodlight ↔ GTM name matching + analyst mapping, CM360 clicks vs GA4 sessions per campaign)
 js/ai.js            providers, AI_SYSTEM prompt, AI_TASKS (writeup, fixplan), aiExplainUnknownTags, aiAuditContext,
                     renderMarkdown (small, safe — escapes HTML first)
 js/app.js           STATE, views (audit, summary, consent, tags, ids, live, findings, ai, settings), runAudit()

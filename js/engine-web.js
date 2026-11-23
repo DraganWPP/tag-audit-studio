@@ -21,6 +21,7 @@ function freshAudit_() {
     ga4Data: null,      // { [measurementId]: property data | { error } } — filled by google.js
     gtagStreams: null,  // { [measurementId]: published gtag.js source } — filled by app.js
     gtagSettings: {},   // { [measurementId]: parsed stream settings } — filled by runGtagStreamChecks_
+    floodlightTags: [], // Floodlight src/type/cat per tag (engine.js recordTag_) — for the CM360 cross-check
     liveData: null,     // stored live consent test — filled by app.js
     liveTest: null
   };

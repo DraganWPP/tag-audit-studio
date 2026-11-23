@@ -628,6 +628,10 @@ async function fetchGa4Full(prop, progress) {
       dimensionFilter: { filter: { fieldName: 'pagePathPlusQueryString',
         stringFilter: { matchType: 'PARTIAL_REGEXP', value: GA4_PII_URL_REGEX, caseSensitive: false } } },
       orderBys: desc('screenPageViews'), limit: 50
+    }),
+    // Sessions per campaign, last 30 days (same window as the CM360 cross-check)
+    R(['sessionCampaignName', 'sessionSourceMedium'], ['sessions'], {
+      dateRanges: [{ startDate: '30daysAgo', endDate: 'yesterday' }], orderBys: desc('sessions'), limit: 1000
     })
   ]), null);
   if (b2) {
@@ -644,6 +648,7 @@ async function fetchGa4Full(prop, progress) {
       revenue: totals.m[0], ecommercePurchases: totals.m[1]
     };
     data.piiPages = ga4ReportRows_(b2[3]).map(r => ({ masked: maskPiiUrl_(r.d[0]), views: r.m[0] }));
+    data.campaigns30d = ga4ReportRows_(b2[4]).map(r => ({ campaign: r.d[0], sourceMedium: r.d[1], sessions: r.m[0] }));
   }
 
   // How often each custom dimension is empty
