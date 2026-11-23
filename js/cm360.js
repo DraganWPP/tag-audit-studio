@@ -10,7 +10,7 @@
 //  counts, never report contents.
 // ════════════════════════════════════════════════════════════════════
 
-const CM360_API = 'https://dfareporting.googleapis.com/dfareporting/v4/';
+const CM360_API = 'https://dfareporting.googleapis.com/dfareporting/v5/';   // v4 is retired (404)
 
 /** CM360 user profiles the signed-in account has (one per CM360 account it can use). */
 async function cm360Profiles() {
