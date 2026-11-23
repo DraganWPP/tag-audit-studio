@@ -1548,6 +1548,20 @@ function renderSettings() {
     </section>
 
     <section class="form-block">
+      <h2 style="margin-top:0">Search Console test</h2>
+      <p class="hint">Checks whether this Google account can see a Search Console property for a website, and what the API returns for it.
+        Needs the extra read-only permission <code>webmasters.readonly</code> (cannot change anything) and the Search Console API enabled in the Google Cloud project.
+        The log shows counts only.</p>
+      <div class="row" style="margin-top:10px">${!Google.isSignedIn() ? googleStatusHtml() : Google.hasScope(GSC_SCOPE)
+        ? '<span class="signed">Search Console connected (read only)</span>'
+        : '<button class="btn secondary" data-act="gsc-connect">Connect Search Console</button>'}</div>
+      <label for="gsc-site" style="margin-top:12px">Website</label>
+      <div class="row"><input type="url" id="gsc-site" value="${esc(STATE.inputs.site)}" placeholder="https://www.example.co.uk" style="max-width:420px">
+        <button class="btn secondary" data-act="gsc-test" ${Google.hasScope(GSC_SCOPE) ? '' : 'disabled'}>Run Search Console test</button></div>
+      <div class="log" id="gsc-log" hidden></div>
+    </section>
+
+    <section class="form-block">
       <h2 style="margin-top:0">Appearance and data</h2>
       <div class="row">
         <label for="set-theme" style="margin:0">Theme</label>
@@ -1557,6 +1571,60 @@ function renderSettings() {
     </section>`;
   $('#set-provider').addEventListener('change', e => { saveAppSettings({ aiProvider: e.target.value, aiModel: '', aiBase: '' }); renderSettings(); });
   $('#set-theme').addEventListener('change', e => { saveAppSettings({ theme: e.target.value }); applyTheme(); });
+}
+
+/** Search Console feasibility test (Settings). Logs counts and the matched property only. */
+async function gscTest(site) {
+  const box = $('#gsc-log');
+  box.hidden = false; box.innerHTML = '';
+  const say = (msg, err) => {
+    box.insertAdjacentHTML('beforeend', '<div' + (err ? ' class="err"' : '') + '>' + esc(msg) + '</div>');
+    box.scrollTop = box.scrollHeight;
+  };
+  const fail = (step, e) => {
+    const off = /has not been used|is disabled|SERVICE_DISABLED|accessNotConfigured/i.test(e.message);
+    say('✖ ' + step + ': ' + (off ? 'the Search Console API is not enabled in the Google Cloud project. Enable "Google Search Console API" and try again.'
+      : (e.status ? 'HTTP ' + e.status + ' ' : '') + e.message), true);
+  };
+  if (site) { STATE.inputs.site = site; saveDraft(); }
+  let sites;
+  try {
+    sites = await gscSites();
+  } catch (e) { fail('Listing Search Console properties', e); return; }
+  const count = re => sites.filter(s => re.test(s.siteUrl)).length;
+  const levels = {};
+  sites.forEach(s => { levels[s.permissionLevel] = (levels[s.permissionLevel] || 0) + 1; });
+  say('✔ Search Console API works. This account can see ' + sites.length + ' propert(ies): ' + count(/^sc-domain:/) + ' Domain, ' +
+      count(/^https?:/) + ' URL prefix.');
+  say('  Access: ' + (Object.keys(levels).map(k => k + ' ' + levels[k]).join(', ') || 'none'));
+  const tags = gscVerificationTags(STATE.inputs.pageSource);
+  say(STATE.inputs.pageSource ? 'Page source on New audit: ' + tags.length + ' Search Console verification tag(s) (google-site-verification).'
+    : 'No page source on New audit, so verification tags were not checked.');
+  if (!site) { say('Enter a website to look for its property.'); return; }
+  const matches = gscMatchSites(site, sites);
+  if (!matches.length) {
+    say('✖ No property this account can see covers ' + gscHost_(site) + '. It may exist under the client\'s or another agency\'s account.', true);
+    return;
+  }
+  say('✔ ' + matches.length + ' propert(ies) cover ' + gscHost_(site) + ': ' + matches.map(m => m.siteUrl + ' (' + m.kind + ', ' + m.permissionLevel + ')').join('; '));
+  const best = matches.find(m => m.permissionLevel !== 'siteUnverifiedUser') || matches[0];
+  say('Reading ' + best.siteUrl + '…');
+  try {
+    const t = await gscQuery(best.siteUrl, [], 28);
+    const r = t.rows[0] || {};
+    say('✔ Search performance ' + t.start + ' to ' + t.end + ': ' + Math.round(r.clicks || 0) + ' clicks, ' + Math.round(r.impressions || 0) + ' impressions' +
+        (r.position ? ', average position ' + r.position.toFixed(1) : '') + '.');
+    const q = await gscQuery(best.siteUrl, ['query'], 28, 250);
+    const p = await gscQuery(best.siteUrl, ['page'], 28, 250);
+    const d = await gscQuery(best.siteUrl, ['date'], 28);
+    say('✔ Breakdowns available: ' + q.rows.length + ' queries, ' + p.rows.length + ' pages, ' + d.rows.length + ' days with data (top 250 each).');
+  } catch (e) { fail('Search performance', e); }
+  try {
+    const maps = await gscSitemaps(best.siteUrl);
+    say('✔ Sitemaps: ' + maps.length + ' submitted, ' + maps.reduce((s, m) => s + m.errors, 0) + ' error(s), ' +
+        maps.reduce((s, m) => s + m.warnings, 0) + ' warning(s), ' + maps.filter(m => m.isPending).length + ' pending.');
+  } catch (e) { fail('Sitemaps', e); }
+  say('Test finished. Nothing was changed in Search Console.');
 }
 
 function applyTheme() {
@@ -2538,6 +2606,14 @@ document.addEventListener('click', async e => {
         Google.signInRedirect(googleClientId(), STATE.view, [CM360_SCOPE]);
         break;
       case 'cm360-run': await runCm360Reports(); break;
+      case 'gsc-connect':
+        if (!stashForSignIn()) break;
+        Google.signInRedirect(googleClientId(), STATE.view, [GSC_SCOPE]);
+        break;
+      case 'gsc-test':
+        el.disabled = true;
+        try { await gscTest($('#gsc-site').value); } finally { el.disabled = false; }
+        break;
       case 'pdf-combined': exportCombinedPdf(); break;
       case 'overview-open':
         if (el.dataset.view === 'ga4') { STATE.ga4.index = Number(el.dataset.index) || 0; STATE.ga4.picking = false; }

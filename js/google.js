@@ -12,7 +12,8 @@ const GOOGLE_SCOPES = [
 ].join(' ');
 // Optional permissions, requested only when the user turns on a feature that needs them
 const CM360_SCOPE = 'https://www.googleapis.com/auth/dfareporting';   // CM360 reports (no campaign/Floodlight edits)
-const GOOGLE_OPTIONAL_SCOPES = [CM360_SCOPE];
+const GSC_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';   // Search Console, read only
+const GOOGLE_OPTIONAL_SCOPES = [CM360_SCOPE, GSC_SCOPE];
 const GOOGLE_SESSION_KEY = 'tas.googleSession';           // sessionStorage: { token, expires, user }
 const GOOGLE_HINT_KEY = 'tas.googleHint';                 // localStorage: last account, suggested at sign-in
 const GTM_API = 'https://tagmanager.googleapis.com/tagmanager/v2/';
