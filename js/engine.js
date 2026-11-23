@@ -1936,6 +1936,34 @@ function recordTag_(o, label, summary, source, group) {
     if (name) AUDIT.ga4Events.push({ name: name, params: params, where: source + (o.name ? ' · ' + o.name : ''), mid: mid });
   }
 
+  // Floodlight (CM360) activities, for the CM360 cross-check: src / type / cat per tag
+  if (AUDIT.floodlightTags) {
+    const tagIndex = AUDIT.tags.length - 1;
+    const add = (src, type, cat, method, uVars) => {
+      if (!src) return;
+      src = String(src).replace(/^DC-/i, '');
+      if (AUDIT.floodlightTags.some(f => f.tagIndex === tagIndex && f.src === src && f.type === type && f.cat === cat)) return;
+      AUDIT.floodlightTags.push({ src: src, type: type || '', cat: cat || '', method: method || '', uVars: uVars || [],
+                                  label: label, where: source, paused: !!o.paused, tagIndex: tagIndex });
+    };
+    if (o.type === 'flc' || o.type === 'fls') {
+      let uVars = [];
+      try { uVars = o.p.pairs('customVariable').map(x => x.k).filter(k => /^u\d+$/i.test(k)); } catch (e) { /* ignore */ }
+      add(o.p.get('advertiserId'), o.p.get('groupTag'), o.p.get('activityTag'),
+          o.p.get('countingMethod') || o.p.get('ordinalType') || (o.type === 'fls' ? 'sales' : 'counter'), uVars);
+    }
+    // gtag send_to 'DC-123/type/cat+method' and Floodlight iframe/img URLs in any tag
+    const sendTo = /DC-(\d{5,12})\/([\w-]+)\/([\w-]+)\+(\w+)/g;
+    let m;
+    while ((m = sendTo.exec(text))) add(m[1], m[2], m[3], m[4], []);
+    const url = /fls\.doubleclick\.net\/activity[ij]?;([^"'\s<>]*)/g;
+    while ((m = url.exec(text))) {
+      const q = {};
+      m[1].split(';').forEach(kv => { const i = kv.indexOf('='); if (i > 0) q[kv.slice(0, i)] = kv.slice(i + 1); });
+      if (q.src) add(q.src, q.type, q.cat, q.ord ? 'counter' : '', Object.keys(q).filter(k => /^u\d+$/i.test(k)));
+    }
+  }
+
   // Custom HTML / template security
   if (!o.paused && (o.type === 'html' || /^cvt_/.test(o.type || ''))) {
     checkCodeSecurity_(o.type === 'html' ? (o.p.get('html') || '') : text, label, source);

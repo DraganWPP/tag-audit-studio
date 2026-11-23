@@ -423,6 +423,7 @@ function buildGa4Result(d, gtm, meta) {
       realtime: D.realtime === undefined ? null : D.realtime
     },
     hasData: hasData,
+    campaigns30d: D.campaigns30d || null,   // for the CM360 cross-check (sessions per campaign, last 30 days)
     gtmSource: gtmRelevant ? gtm.source : null,
     issues: sorted, areas: areas, score: { score: score, grade: grade },
     crossRef: crossRef,

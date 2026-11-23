@@ -5,9 +5,9 @@
   "description": "Audit GTM, GA4 and cookie consent setups in the browser and produce a client-ready report.",
   "scripts": {
     "start": "npx --yes http-server . -p 8000 -c-1",
-    "check": "node --check js/config.js && node --check js/engine.js &&node --check js/engine-web.js && node --check js/google.js && node --check js/ga4.js &&node --check js/ai.js && node --check js/report.js && node --check js/app.js && node --check runner/core.cjs && node --check runner/run.cjs",
+    "check": "node --check js/config.js && node --check js/engine.js && node --check js/engine-web.js && node --check js/google.js && node --check js/ga4.js && node --check js/cm360.js && node --check js/ai.js && node --check js/report.js && node --check js/app.js && node --check runner/core.cjs && node --check runner/run.cjs",
     "runner": "node runner/run.cjs",
-    "test": "node --test tests/runner.test.cjs tests/ga4.test.cjs"
+    "test": "node --test tests/runner.test.cjs tests/ga4.test.cjs tests/cm360.test.cjs"
   },
   "devDependencies": {
     "playwright": "^1.56.1",
