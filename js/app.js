@@ -24,7 +24,7 @@ function saveDraft() {
   try {
     localStorage.setItem(DRAFT_KEY, JSON.stringify({
       client: i.client, site: i.site, publicIds: i.publicIds, apiIds: i.apiIds, apiTarget: i.apiTarget, ga4: i.ga4,
-      ga4Full: i.ga4Full, rules: i.rules
+      ga4Full: i.ga4Full, cm360Auto: i.cm360Auto, rules: i.rules
     }));
   } catch (e) { /* ignore */ }
 }
@@ -36,7 +36,7 @@ function loadDraft() {
 
 const STATE = {
   view: 'audit',
-  inputs: Object.assign({ client: '', site: '', publicIds: '', apiIds: '', apiTarget: 'live', ga4: true, ga4Full: true, rules: {},
+  inputs: Object.assign({ client: '', site: '', publicIds: '', apiIds: '', apiTarget: 'live', ga4: true, ga4Full: true, cm360Auto: true, rules: {},
                           exports: [], pageSource: '', live: null }, loadDraft() || {}),
   result: null,
   ai: { writeup: '', fixplan: '', chat: [], busy: '' },
@@ -49,6 +49,8 @@ const STATE = {
   // CM360 check: accounts, chosen configuration, pending reports, parsed data, analyst mapping, result
   cm360: { profiles: null, configs: {}, profileId: '', configId: '', loading: false, running: false, prep: null, files: {},
            data: null, mapping: {}, result: null, picking: false, tab: 'overview', log: [] },
+  // Automatic run (GTM → GA4 → CM360): { date, running, steps: [{ key, label, status, note }] }
+  auto: null,
   consentFilter: 'All',
   tagSection: 'tags',
   workspaceOptions: [],
@@ -100,12 +102,14 @@ function sevClass(s) { return esc(s === '—' ? 'Paused' : s); }
 
 const VIEWS = {
   audit: renderAudit, summary: renderSummary, consent: renderConsent, tags: renderTags, ids: renderIds,
-  live: renderLive, findings: renderFindings, ai: renderAI, settings: renderSettings, ga4: renderGa4, cm360: renderCm360
+  live: renderLive, findings: renderFindings, ai: renderAI, settings: renderSettings, ga4: renderGa4, cm360: renderCm360,
+  overview: renderOverview
 };
 
 function setView(view) {
   if (!VIEWS[view]) view = 'audit';
   if (!STATE.result && ['summary', 'consent', 'tags', 'ids', 'live', 'findings', 'ai'].indexOf(view) >= 0) view = 'audit';
+  if (view === 'overview' && !hasOverview()) view = 'audit';
   STATE.view = view;
   $$('#nav .nav-item').forEach(b => {
     if (b.dataset.view === view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
@@ -148,12 +152,13 @@ function updateGoogleStatus() {
 const SIGNIN_STASH_KEY = 'tas.signinStash';
 function stashForSignIn() {
   saveDraft();
-  if (!STATE.result && !STATE.ga4.result && !STATE.cm360.data) return true;
+  if (!STATE.result && !STATE.ga4.result && !STATE.cm360.data && !STATE.auto) return true;
   try {
     sessionStorage.setItem(SIGNIN_STASH_KEY, JSON.stringify({
       result: STATE.result, ga4: STATE.ga4.result, ai: { writeup: STATE.ai.writeup, fixplan: STATE.ai.fixplan, chat: STATE.ai.chat },
       cm360: STATE.cm360.data ? { data: STATE.cm360.data, mapping: STATE.cm360.mapping } : null,
-      overrides: STATE.overrides, ga4Index: STATE.ga4.index, ga4Tab: STATE.ga4.tab
+      overrides: STATE.overrides, ga4Index: STATE.ga4.index, ga4Tab: STATE.ga4.tab,
+      auto: STATE.auto ? Object.assign({}, STATE.auto, { running: false }) : null
     }));
     return true;
   } catch (e) {
@@ -174,6 +179,7 @@ function restoreSignInStash() {
   STATE.ga4.tab = s.ga4Tab || 'overview';
   STATE.ai = Object.assign(STATE.ai, s.ai || {});
   STATE.overrides = s.overrides || {};
+  STATE.auto = s.auto || null;
 }
 
 function updateNav() {
@@ -188,6 +194,8 @@ function updateNav() {
   const g4 = STATE.ga4.result;
   const g4High = g4 ? g4.properties.reduce((s, p) => s + p.issues.filter(i => i.severity === 'High').length, 0) : 0;
   setCount('ga4', g4High, g4High > 0);
+  const ov = $('#nav [data-view="overview"]');
+  if (ov) ov.disabled = !hasOverview();
   if (!r) return;
   const high = r.issues.filter(i => i.severity === 'High').length;
   const consentHigh = r.audit.tags.filter(t => !t.paused && t.risk === 'High').length;
@@ -240,6 +248,12 @@ async function fetchPublicGtag(mid) {
   return STATE.caches.gtag[mid];
 }
 
+function hasAuditSources() {
+  const i = STATE.inputs;
+  return !!(parseIds(i.publicIds).length || (i.pageSource && parseIds(i.pageSource).length) || parseIds(i.apiIds).length ||
+            i.exports.length || (i.live && Object.keys(i.live.stages || {}).length));
+}
+
 async function runAudit(opts) {
   opts = opts || {};
   if (STATE.running) return;
@@ -247,7 +261,7 @@ async function runAudit(opts) {
   const pageIds = i.pageSource ? parseIds(i.pageSource) : [];
   const apiIds = parseIds(i.apiIds);
   const hasLive = i.live && Object.keys(i.live.stages || {}).length;
-  if (!parseIds(i.publicIds).length && !pageIds.length && !apiIds.length && !i.exports.length && !hasLive) {
+  if (!hasAuditSources()) {
     toast('Add at least one source: a GTM ID, a container export, page source or live test results.', true);
     return;
   }
@@ -441,10 +455,12 @@ async function runAudit(opts) {
     saveDraft();
     updateNav();
     if (!opts.stay) setView('summary'); else VIEWS[STATE.view]();
+    return true;
   } catch (e) {
     console.error(e);
     log('Audit failed: ' + e.message, true);
     toast('Audit failed: ' + e.message, true);
+    return false;
   } finally {
     STATE.running = false;
     const b = $('#run-btn');
@@ -548,6 +564,11 @@ function renderAudit() {
           <p class="hint">A workspace includes changes that are not live yet. Use it to review work in progress before it's published.</p>
           <label style="margin-top:10px;font-weight:400"><input type="checkbox" id="in-ga4" ${i.ga4 ? 'checked' : ''}> Check the GA4 properties behind the measurement IDs found</label>
           <label style="margin-top:6px;font-weight:400"><input type="checkbox" id="in-ga4full" ${i.ga4Full ? 'checked' : ''}> Also run the full GA4 audit for them (separate GA4 report, includes the last 28 days of data)</label>
+          <label style="margin-top:6px;font-weight:400"><input type="checkbox" id="in-cm360auto" ${i.cm360Auto ? 'checked' : ''}> Then run the CM360 check if GTM has Floodlight tags</label>
+          <p class="hint">${Google.hasScope(CM360_SCOPE) ? 'CM360 reports are connected.' : Google.isSignedIn()
+            ? 'CM360 needs its own reports-only permission. <button class="link" data-act="cm360-connect">Connect CM360 now</button>, or the run asks for it when it gets there.'
+            : 'Sign in with Google first; CM360 also needs its own reports-only permission.'}
+            The run pauses once for you to download the two CM360 reports and drop them in.</p>
         </div>
       </div>
 
@@ -606,7 +627,7 @@ function renderAudit() {
     el.addEventListener(prop === 'checked' ? 'change' : 'input', () => { STATE.inputs[key] = el[prop || 'value']; saveDraft(); });
   };
   bind('in-client', 'client'); bind('in-site', 'site'); bind('in-public', 'publicIds');
-  bind('in-api', 'apiIds'); bind('in-ga4', 'ga4', 'checked'); bind('in-ga4full', 'ga4Full', 'checked'); bind('in-page', 'pageSource'); bind('in-target', 'apiTarget');
+  bind('in-api', 'apiIds'); bind('in-ga4', 'ga4', 'checked'); bind('in-ga4full', 'ga4Full', 'checked'); bind('in-cm360auto', 'cm360Auto', 'checked'); bind('in-page', 'pageSource'); bind('in-target', 'apiTarget');
   $$('[data-rule]').forEach(el => el.addEventListener('input', () => { STATE.inputs.rules[el.dataset.rule] = el.value; saveDraft(); }));
 
   $('#in-export').addEventListener('change', async e => {
@@ -616,7 +637,7 @@ function renderAudit() {
     }
     renderAudit();
   });
-  $('#run-btn').addEventListener('click', () => runAudit());
+  $('#run-btn').addEventListener('click', () => runFullAudit());
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1559,7 +1580,7 @@ function ga4Log(msg, isError) {
     el.hidden = false;
     el.insertAdjacentHTML('beforeend', '<div' + (isError ? ' class="err"' : '') + '>' + esc(msg) + '</div>');
     el.scrollTop = el.scrollHeight;
-  } else if (STATE.view === 'audit') {
+  } else if (STATE.view === 'audit' || STATE.view === 'overview') {
     log(msg, isError);
   }
 }
@@ -1825,6 +1846,7 @@ const CM360_TABS = [['overview', 'Overview'], ['mapping', 'Floodlight mapping'],
 function cm360Log(msg, isError) {
   const c = STATE.cm360;
   c.log.push({ msg: msg, err: !!isError });
+  if (STATE.view === 'overview') log(msg, isError);
   const el = $('#cm360-log');
   if (el) {
     el.hidden = false;
@@ -1884,7 +1906,7 @@ async function loadCm360Accounts() {
     toast('Could not read your CM360 accounts: ' + e.message, true);
   } finally {
     c.loading = false;
-    if (STATE.view === 'cm360') renderCm360();
+    refreshCm360Views();
   }
 }
 
@@ -1892,18 +1914,19 @@ async function runCm360Reports() {
   const c = STATE.cm360;
   if (c.running || !c.profileId || !c.configId) return;
   c.running = true; c.log = []; c.prep = null; c.files = {};
+  refreshCm360Views();
   const btn = $('#cm360-run-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Running reports in CM360…'; }
   try {
     cm360Log('Running two reports in CM360 for Floodlight configuration ' + c.configId + ' (last 30 days)…');
     c.prep = await cm360PrepareCrossCheck(c.profileId, c.configId, cm360Log);
-    cm360Log('Both reports are ready. Download them with the buttons below, then add both files.');
+    cm360Log('Both reports are ready. Download them with the two buttons, then drop both files in.');
   } catch (e) {
     cm360Log('CM360 reports failed: ' + e.message, true);
     toast('CM360 reports failed: ' + e.message, true);
   } finally {
     c.running = false;
-    if (STATE.view === 'cm360') renderCm360();
+    refreshCm360Views();
   }
 }
 
@@ -1918,7 +1941,7 @@ async function addCm360Files(files) {
     } catch (e) { cm360Log('✖ ' + f.name + ': ' + e.message, true); }
   }
   if (c.files.floodlight && c.files.delivery) await finishCm360();
-  else renderCm360();
+  else refreshCm360Views();
 }
 
 /** Builds the CM360 data from the added files and deletes the temporary reports. */
@@ -1941,7 +1964,38 @@ async function finishCm360() {
   };
   c.prep = null; c.files = {}; c.picking = false; c.tab = 'overview';
   computeCm360Result();
-  renderCm360();
+  autoCm360Finished();
+  refreshCm360Views();
+}
+
+/** Re-renders the views that show CM360 progress (the CM360 check and the Overview). */
+function refreshCm360Views() {
+  if (STATE.view === 'cm360') renderCm360();
+  else if (STATE.view === 'overview') renderOverview();
+}
+
+/** The drop zone for the two downloaded CM360 reports (also a file picker). */
+function cm360DropZone() {
+  const c = STATE.cm360;
+  return `<label class="dropzone" for="cm360-files" data-dropzone="cm360">
+      <input type="file" id="cm360-files" accept=".csv,text/csv" multiple>
+      <strong>Drop both CM360 reports here</strong>
+      <span>Drag the two CSV files from Chrome's download bubble or the downloads page (Ctrl+J), or click to choose them.</span>
+      <span class="got">${['floodlight', 'delivery'].map(k => (c.files[k] ? '✓ ' : '○ ') + (k === 'floodlight' ? 'Floodlight report' : 'Delivery report')).join(' · ')}</span>
+    </label>`;
+}
+
+/** Download links for the two prepared reports, plus the drop zone. */
+function cm360ManualHtml() {
+  const c = STATE.cm360;
+  if (!c.prep) return '';
+  return `<div class="actions">
+        <a class="btn ${c.files.floodlight ? 'secondary' : ''}" href="${esc(c.prep.floodlight.browserUrl)}" target="_blank" rel="noopener">1. Download Floodlight report${c.files.floodlight ? ' ✓' : ''}</a>
+        <a class="btn ${c.files.delivery ? 'secondary' : ''}" href="${esc(c.prep.delivery.browserUrl)}" target="_blank" rel="noopener">2. Download delivery report${c.files.delivery ? ' ✓' : ''}</a>
+      </div>
+      ${cm360DropZone()}
+      <p class="hint">Both are read in this browser; only counts per activity and campaign are kept. The reports are then deleted from CM360.
+        ${c.files.floodlight || c.files.delivery ? ' <button class="link" data-act="cm360-finish">Continue with the file I have</button>' : ''}</p>`;
 }
 
 function renderCm360() {
@@ -2076,14 +2130,7 @@ function renderCm360Start() {
     </div>
     ${c.prep ? `<section class="form-block" id="cm360-manual">
       <h2 style="margin-top:0">Download the two reports</h2>
-      <div class="actions">
-        <a class="btn ${c.files.floodlight ? 'secondary' : ''}" href="${esc(c.prep.floodlight.browserUrl)}" target="_blank" rel="noopener">1. Floodlight report${c.files.floodlight ? ' ✓' : ''}</a>
-        <a class="btn ${c.files.delivery ? 'secondary' : ''}" href="${esc(c.prep.delivery.browserUrl)}" target="_blank" rel="noopener">2. Delivery report${c.files.delivery ? ' ✓' : ''}</a>
-      </div>
-      <label for="cm360-files">3. Add both downloaded CSV files</label>
-      <input type="file" id="cm360-files" accept=".csv,text/csv" multiple>
-      <p class="hint">Both are read in this browser; only counts per activity and campaign are kept. The reports are then deleted from CM360.
-        ${c.files.floodlight || c.files.delivery ? ' <button class="link" data-act="cm360-finish">Continue with the file I have</button>' : ''}</p>
+      ${cm360ManualHtml()}
     </section>` : ''}
     <div class="log" id="cm360-log" ${c.log.length ? '' : 'hidden'}>${c.log.map(l => '<div' + (l.err ? ' class="err"' : '') + '>' + esc(l.msg) + '</div>').join('')}</div>`;
   const ps = $('#cm360-profile');
@@ -2127,6 +2174,225 @@ function exportCm360Pdf() {
   document.title = 'CM360 check - ' + fileSlug();
   window.print();
   document.title = title;
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  AUTOMATIC RUN (GTM → GA4 → CM360) AND OVERVIEW
+// ══════════════════════════════════════════════════════════════════
+
+const AUTO_STATUS = {
+  pending: 'Waiting', running: 'Running', done: 'Done', skipped: 'Skipped', failed: 'Failed',
+  waiting: 'Your turn', connect: 'Your turn'
+};
+
+function hasOverview() {
+  return !!STATE.auto || (STATE.result ? 1 : 0) + (STATE.ga4.result ? 1 : 0) + (STATE.cm360.result ? 1 : 0) > 1;
+}
+
+function autoStep(key) { return STATE.auto ? STATE.auto.steps.find(s => s.key === key) : null; }
+
+function setAutoStep(key, status, note) {
+  const st = autoStep(key);
+  if (!st) return;
+  st.status = status;
+  if (note !== undefined) st.note = note;
+  updateNav();
+  if (STATE.view === 'overview') renderOverview();
+}
+
+/** Live GA4 measurement IDs found by the GTM audit. */
+function liveGa4IdsFromResult(r) {
+  if (!r) return [];
+  return Array.from(new Set(Object.keys(r.audit.ids).map(k => r.audit.ids[k])
+    .filter(x => x.platform === 'GA4' && x.live && /^G-[A-Z0-9]+$/.test(x.id)).map(x => x.id)));
+}
+
+/**
+ * One click: the GTM audit (which also finds the GA4 properties and runs the GA4 audit),
+ * then the CM360 check when GTM has Floodlight tags. Ends on the Overview, or on the
+ * Summary when only the GTM audit applied.
+ */
+async function runFullAudit() {
+  if (STATE.running || (STATE.auto && STATE.auto.running)) return;
+  const i = STATE.inputs;
+  if (!hasAuditSources()) {
+    toast('Add at least one source: a GTM ID, a container export, page source or live test results.', true);
+    return;
+  }
+  const prev = STATE.auto;
+  STATE.auto = { date: new Date().toISOString(), running: true, steps: [
+    { key: 'gtm', label: 'GTM and consent audit', status: 'running', note: '' },
+    { key: 'ga4', label: 'GA4 audit', status: 'pending', note: 'Finds the GA4 properties behind the measurement IDs in GTM' },
+    { key: 'cm360', label: 'CM360 check', status: 'pending', note: 'Runs when GTM has Floodlight tags' }
+  ] };
+  // Results of an earlier run belong to another site or another point in time
+  const oldGa4 = STATE.ga4.result, oldCm = { data: STATE.cm360.data, result: STATE.cm360.result };
+  STATE.ga4.result = null;
+  Object.assign(STATE.cm360, { data: null, result: null, prep: null, files: {}, log: [], picking: false });
+  STATE.log = [];
+  setView('overview');   // the run sheet and log show progress
+  const ok = await runAudit({ stay: true });
+  if (!ok) {
+    // The audit failed: put the earlier results back and show the log on New audit
+    STATE.auto = prev;
+    if (!STATE.ga4.result) STATE.ga4.result = oldGa4;
+    if (!STATE.cm360.data) Object.assign(STATE.cm360, oldCm);
+    updateNav();
+    setView('audit');
+    return;
+  }
+  const r = STATE.result;
+  setAutoStep('gtm', 'done', 'Grade ' + r.score.grade + ' (' + r.score.score + '/100), ' + r.issues.length + ' issue(s)');
+
+  const mids = liveGa4IdsFromResult(r);
+  const g4 = STATE.ga4.result;
+  if (g4) setAutoStep('ga4', 'done', g4.properties.map(p => p.displayName + ': grade ' + p.score.grade).join(' · '));
+  else if (!i.ga4Full || (i.rules.ga4Checks || 'Auto') === 'No') setAutoStep('ga4', 'skipped', 'Turned off on New audit');
+  else if (!mids.length) setAutoStep('ga4', 'skipped', 'GTM has no live GA4 measurement ID');
+  else if (!Google.isSignedIn()) setAutoStep('ga4', 'skipped', 'Sign in with Google to run it');
+  else setAutoStep('ga4', 'skipped', 'None of your GA4 properties has ' + mids.join(', '));
+
+  STATE.auto.running = false;
+  await autoCm360Step();
+  const ranMore = STATE.ga4.result || ['waiting', 'connect', 'done', 'failed'].indexOf(autoStep('cm360').status) >= 0;
+  setView(ranMore ? 'overview' : 'summary');
+}
+
+/** The CM360 part of the automatic run. Pauses ('connect' or 'waiting') where the analyst has to act. */
+async function autoCm360Step() {
+  const c = STATE.cm360;
+  const srcs = cm360SrcsFromGtm();
+  if (!autoStep('cm360')) return;
+  if (!STATE.inputs.cm360Auto) return setAutoStep('cm360', 'skipped', 'Turned off on New audit');
+  if (!srcs.length) return setAutoStep('cm360', 'skipped', 'GTM has no live Floodlight tags');
+  const ids = srcs.map(s => 'DC-' + s.src).join(', ');
+  if (!Google.isSignedIn()) return setAutoStep('cm360', 'skipped', 'GTM sends to ' + ids + '. Sign in with Google to run it');
+  if (!Google.hasScope(CM360_SCOPE)) return setAutoStep('cm360', 'connect', 'GTM sends to ' + ids + '. Connect CM360 (reports only) to continue');
+  STATE.auto.running = true;
+  try {
+    setAutoStep('cm360', 'running', 'Finding the CM360 account that owns ' + ids + '…');
+    c.profiles = null;
+    await loadCm360Accounts();
+    if (!c.profiles) return setAutoStep('cm360', 'failed', 'Could not read your CM360 accounts');
+    if (!c.profiles.length) return setAutoStep('cm360', 'skipped', 'This Google account has no CM360 user profile');
+    const owned = srcs.filter(s => Object.keys(c.configs).some(k => c.configs[k].indexOf(s.src) >= 0));
+    if (!owned.length) {
+      return setAutoStep('cm360', 'skipped', 'None of your CM360 accounts owns ' + ids +
+        ' (another agency, another advertiser or a test setup). Check who owns it');
+    }
+    const prof = c.profiles.find(p => String(p.profileId) === String(c.profileId)) || {};
+    setAutoStep('cm360', 'running', 'Running two reports in ' + (prof.accountName || 'CM360') + ' for DC-' + c.configId + ' (can take a few minutes)…');
+    await runCm360Reports();
+    if (!c.prep) return setAutoStep('cm360', 'failed', 'The CM360 reports did not finish. See the log, then try again from CM360 check');
+    setAutoStep('cm360', 'waiting', 'Download both reports and drop them below' +
+      (owned.length < srcs.length ? '. Only DC-' + c.configId + ' is checked; ' + (srcs.length - owned.length) + ' other configuration(s) are not in your accounts' : ''));
+  } finally {
+    STATE.auto.running = false;
+  }
+}
+
+function autoCm360Finished() {
+  const st = autoStep('cm360');
+  const r = STATE.cm360.result;
+  if (st && r && (st.status === 'waiting' || st.status === 'running')) {
+    setAutoStep('cm360', 'done', 'Grade ' + r.score.grade + ' (' + r.score.score + '/100), ' + r.issues.length + ' issue(s)');
+    toast('CM360 check finished');
+  }
+}
+
+/** All reports in this session, for the Overview and the combined PDF. */
+function overviewReports() {
+  const list = [];
+  const counts = issues => ['High', 'Medium', 'Low'].map(s => issues.filter(x => x.severity === s).length);
+  if (STATE.result) {
+    list.push({ key: 'gtm', label: 'GTM and consent', sub: (STATE.result.meta.sources || []).join(', '),
+      score: STATE.result.score, issues: STATE.result.issues, counts: counts(STATE.result.issues), view: 'summary' });
+  }
+  if (STATE.ga4.result) {
+    STATE.ga4.result.properties.forEach((p, n) => list.push({ key: 'ga4-' + n, label: 'GA4: ' + p.displayName,
+      sub: String(p.property).replace('properties/', 'Property ') + (p.account ? ' · ' + p.account : ''),
+      score: p.score, issues: p.issues, counts: counts(p.issues), view: 'ga4', index: n }));
+  }
+  if (STATE.cm360.result) {
+    const r = STATE.cm360.result;
+    list.push({ key: 'cm360', label: 'CM360', sub: joinParts_(r.account, 'DC-' + r.configId), score: r.score, issues: r.issues,
+      counts: counts(r.issues), view: 'cm360' });
+  }
+  return list;
+}
+
+function renderOverview() {
+  const a = STATE.auto, reports = overviewReports(), i = STATE.inputs;
+  const top = [].concat(...reports.map(rep => rep.issues.map(x => Object.assign({ report: rep.label }, x))))
+    .filter(x => x.severity !== 'Low').sort((p, q) => SEVERITY_ORDER[p.severity] - SEVERITY_ORDER[q.severity]);
+  const busy = a && a.steps.some(s => s.status === 'running' || s.status === 'pending');
+  $('#view').innerHTML = `
+    <h1>Overview</h1>
+    <p class="lede">${esc(joinParts_(i.client, i.site) || 'All reports in this session')}${a ? ' · run started ' + esc(new Date(a.date).toLocaleString()) : ''}</p>
+    ${a ? `<section class="form-block" aria-labelledby="run-h">
+      <h2 id="run-h" style="margin-top:0">Run</h2>
+      <ol class="runsheet">${a.steps.map(s => `<li class="st-${esc(s.status)}">
+        <span class="st-mark" aria-hidden="true"></span>
+        <div><strong>${esc(s.label)}</strong> <span class="st-label">${esc(AUTO_STATUS[s.status] || s.status)}</span>
+          ${s.note ? `<p class="hint">${esc(s.note)}</p>` : ''}
+          ${s.key === 'cm360' && s.status === 'connect' ? '<div class="actions"><button class="btn" data-act="cm360-connect">Connect CM360</button></div>' : ''}
+          ${s.key === 'cm360' && s.status === 'waiting' ? cm360ManualHtml() : ''}
+        </div></li>`).join('')}</ol>
+    </section>` : ''}
+    <h2>Reports</h2>
+    ${reports.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Report</th><th>Grade</th><th>High</th><th>Medium</th><th>Low</th><th><span class="vh">Open</span></th></tr></thead>
+      <tbody>${reports.map(rep => `<tr>
+        <td class="wrap"><strong>${esc(rep.label)}</strong><span class="sub">${esc(rep.sub)}</span></td>
+        <td><span class="grade-chip g-${esc(rep.score.grade)}">${esc(rep.score.grade)}</span> ${rep.score.score}/100</td>
+        <td>${rep.counts[0] ? '<span class="hl-mark">' + rep.counts[0] + '</span>' : 0}</td><td>${rep.counts[1]}</td><td>${rep.counts[2]}</td>
+        <td><button class="link" data-act="overview-open" data-view="${rep.view}" data-index="${rep.index || 0}">Open<span class="vh"> ${esc(rep.label)}</span></button></td></tr>`).join('')}</tbody>
+    </table></div>` : '<div class="empty">No reports yet.</div>'}
+    <div class="actions">
+      <button class="btn" data-act="pdf-combined" ${reports.length ? '' : 'disabled'}>Combined client PDF</button>
+      <button class="btn secondary" data-act="save" ${reports.length ? '' : 'disabled'}>Save audit</button>
+      <button class="btn secondary" data-act="goto" data-view="audit">New audit</button>
+    </div>
+    <h2>Top actions across the reports</h2>
+    ${top.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Priority</th><th>Report</th><th>Finding</th><th>Action</th></tr></thead>
+      <tbody>${top.slice(0, 15).map(x => `<tr><td><span class="sev ${esc(x.severity)}">${esc(x.severity)}</span></td><td>${esc(x.report)}</td>
+        <td class="wrap">${x.severity === 'High' ? '<span class="hl-mark">' + esc(x.finding) + '</span>' : esc(x.finding)}</td><td class="wrap">${esc(x.action)}</td></tr>`).join('')}</tbody>
+    </table></div>${top.length > 15 ? `<p class="hint">${top.length - 15} more in the individual reports.</p>` : ''}`
+      : `<div class="empty">${busy ? 'Actions appear here as each report finishes.' : 'No high or medium priority actions.'}</div>`}
+    <div class="log" id="run-log" ${STATE.log.length ? '' : 'hidden'}>${STATE.log.map(l => '<div' + (l.err ? ' class="err"' : '') + '>' + esc(l.msg) + '</div>').join('')}</div>`;
+}
+
+/** One client PDF: an overview page, then the client report of each review that ran. */
+function exportCombinedPdf() {
+  const i = STATE.inputs;
+  const reports = [];
+  if (STATE.result) {
+    const m = clientReportModel(STATE.result);
+    reports.push({ label: 'Tag manager & consent', model: Object.assign(m, { footerLabel: 'Tag manager & consent' }) });
+  }
+  if (STATE.ga4.result) {
+    STATE.ga4.result.properties.forEach(p =>
+      reports.push({ label: 'Analytics: ' + p.displayName, model: ga4ClientReportModel(STATE.ga4.result, p) }));
+  }
+  if (STATE.cm360.result) {
+    reports.push({ label: 'Campaign Manager 360', model: cm360ClientReportModel(STATE.cm360.result,
+      { client: i.client, site: i.site, date: STATE.cm360.data && STATE.cm360.data.date }) });
+  }
+  if (!reports.length) throw new Error('Run an audit before exporting a report.');
+  const notChecked = [];
+  if (!STATE.result) notChecked.push(['Tag manager & consent', 'Not part of this review.']);
+  if (!STATE.ga4.result) notChecked.push(['Analytics (GA4)', 'Not part of this review.']);
+  if (!STATE.cm360.result) notChecked.push(['Campaign Manager 360', 'Not part of this review.']);
+  const meta = { client: i.client || hostOf_(i.site) || reports[0].model.client, site: i.site || reports[0].model.site,
+                 date: new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) };
+  const target = $('#print-report');
+  target.className = 'client-report';
+  target.innerHTML = combinedCoverHtml(reports, meta, notChecked) + reports.map(x => clientReportHtml(x.model)).join('');
+  const title = document.title;
+  document.title = 'Measurement review - ' + fileSlug();
+  try { window.print(); }
+  finally { document.title = title; }
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -2272,6 +2538,11 @@ document.addEventListener('click', async e => {
         Google.signInRedirect(googleClientId(), STATE.view, [CM360_SCOPE]);
         break;
       case 'cm360-run': await runCm360Reports(); break;
+      case 'pdf-combined': exportCombinedPdf(); break;
+      case 'overview-open':
+        if (el.dataset.view === 'ga4') { STATE.ga4.index = Number(el.dataset.index) || 0; STATE.ga4.picking = false; }
+        if (el.dataset.view === 'cm360') STATE.cm360.picking = false;
+        setView(el.dataset.view); break;
       case 'cm360-finish': await finishCm360(); break;
       case 'cm360-new': STATE.cm360.picking = true; renderCm360(); break;
       case 'cm360-back': STATE.cm360.picking = false; renderCm360(); break;
@@ -2400,6 +2671,26 @@ document.addEventListener('change', async e => {
   }
 });
 
+// Drop zone for the CM360 report files
+document.addEventListener('dragover', e => {
+  const z = e.target.closest && e.target.closest('[data-dropzone]');
+  if (!z) return;
+  e.preventDefault();
+  z.classList.add('over');
+});
+document.addEventListener('dragleave', e => {
+  const z = e.target.closest && e.target.closest('[data-dropzone]');
+  if (z && !z.contains(e.relatedTarget)) z.classList.remove('over');
+});
+document.addEventListener('drop', async e => {
+  const z = e.target.closest && e.target.closest('[data-dropzone]');
+  if (!z) return;
+  e.preventDefault();
+  z.classList.remove('over');
+  const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+  if (files.length) await addCm360Files(files);
+});
+
 document.addEventListener('change', e => {
   if (!e.target.matches('[data-ga4-prop]')) return;
   const g = STATE.ga4, name = e.target.dataset.ga4Prop;
@@ -2439,10 +2730,14 @@ if (oauthReturn) restoreSignInStash();
 updateNav();
 window.addEventListener('google-session-changed', () => {
   updateGoogleStatus();
-  if (['audit', 'ga4', 'settings'].indexOf(STATE.view) >= 0 && !STATE.running && !STATE.ga4.running) VIEWS[STATE.view]();
+  if (['audit', 'ga4', 'settings', 'overview'].indexOf(STATE.view) >= 0 && !STATE.running && !STATE.ga4.running) VIEWS[STATE.view]();
 });
 setView(oauthReturn ? oauthReturn.view : (location.hash || '#audit').slice(1));
 if (oauthReturn) toast(oauthReturn.error || 'Signed in to Google', !!oauthReturn.error);
+// Back from "Connect CM360" during an automatic run: carry on with the CM360 step
+if (oauthReturn && !oauthReturn.error && autoStep('cm360') && autoStep('cm360').status === 'connect' && Google.hasScope(CM360_SCOPE)) {
+  autoCm360Step();
+}
 if (Google.isSignedIn() && !Google.user) {
   Google.loadUser().then(() => window.dispatchEvent(new Event('google-session-changed')));
 }
