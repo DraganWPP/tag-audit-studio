@@ -92,6 +92,7 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 table.connections th { width: 40%; }
 table.connections th .sub { display: block; font-weight: 400; margin-top: 2px; }
 table.connections td { vertical-align: middle; }
+.map-select { width: 100%; max-width: 340px; }
 .signed .account { font-family: var(--mono); font-weight: 500; font-size: .85rem; }
 details.advanced { margin-top: 14px; }
 details.advanced > summary { cursor: pointer; color: var(--muted); font-size: .9rem; }

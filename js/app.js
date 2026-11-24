@@ -152,7 +152,7 @@ function googleStatusHtml() {
 
 /** Short names of the extra permissions the main sign-in has. */
 function connectedExtras() {
-  return [[GSC_SCOPE, 'Search Console'], [CM360_SCOPE, 'CM360']].filter(x => (Google.scopes || []).indexOf(x[0]) >= 0).map(x => x[1]);
+  return [[GSC_SCOPE, 'Search Console'], [CM360_SCOPE, 'CM360'], [CM360_TRAFFIC_SCOPE, 'Floodlight setup']].filter(x => (Google.scopes || []).indexOf(x[0]) >= 0).map(x => x[1]);
 }
 
 function updateGoogleStatus() {
@@ -203,6 +203,7 @@ function connectionsHtml() {
           : `<button class="btn secondary" data-act="signin">${Google.hasExpired() ? 'Renew sign-in' : 'Sign in with Google'}</button>`)}
       ${row('Search Console', 'Same account, read only. Asked for when first used', extra(GSC_SCOPE, 'gsc-connect'), '')}
       ${row('CM360', 'Same account, reports only. Asked for when first used', extra(CM360_SCOPE, 'cm360-connect'), '')}
+      ${row('CM360 Floodlight setup', 'Same account. Exact Floodlight tag matching. Edit-level permission; the app only reads Floodlight activities', extra(CM360_TRAFFIC_SCOPE, 'cm360-exact-connect'), '')}
       ${row('Google Ads', 'Its own Google account (can be different). Needs a developer token below', GoogleAds.hasScope(ADS_SCOPE)
           ? ok('Signed in') + (GoogleAds.user ? '<span class="sub">' + esc(GoogleAds.user) + '</span>' : '') : GoogleAds.hasExpired() ? '<span class="sev Medium">Ended</span>' : 'Not signed in',
         GoogleAds.hasScope(ADS_SCOPE) ? '<button class="link" data-act="ads-renew">Renew</button> · <button class="link" data-act="ads-signout">Sign out</button>'
@@ -2168,7 +2169,7 @@ async function finishCm360() {
   c.data = {
     date: new Date().toISOString(), account: prof.accountName || '', accountId: prof.accountId || '', configId: String(c.configId),
     configsOwned: [].concat(...Object.keys(c.configs || {}).map(k => c.configs[k])),
-    metrics: p ? p.metrics : [], catalog: p ? p.catalog : [],
+    metrics: p ? p.metrics : [], catalog: p ? p.catalog : [], setup: p ? p.setup || null : null, profileId: String(c.profileId || ''),
     activities: c.files.floodlight ? c.files.floodlight.activities : null,
     delivery: c.files.delivery ? c.files.delivery.rows : null
   };
@@ -2259,13 +2260,15 @@ function cm360MappingTable(r, forPrint) {
       <td class="wrap"><strong>${esc(m.labels.join(', '))}</strong><span class="sub">${esc(m.where.join(', '))}${m.uVars.length ? ' · variables ' + esc(m.uVars.join(', ')) : ''}</span></td>
       <td><code>${esc(m.type)}/${esc(m.cat)}</code>${m.method ? '<span class="sub">' + esc(m.method) + '</span>' : ''}</td>
       <td class="wrap">${forPrint ? esc(m.activityName || '—') : `<label class="skip" for="map-${esc(m.key)}">CM360 activity for ${esc(m.labels[0])}</label>
-        <select id="map-${esc(m.key)}" data-cm360-map="${esc(m.key)}" style="width:auto;max-width:100%">
-          <option value="">${m.status === 'Suggested' || m.status === 'Confirmed' ? 'Automatic suggestion' : 'Choose…'}</option>
+        <select id="map-${esc(m.key)}" data-cm360-map="${esc(m.key)}" class="map-select">
+          <option value="">${m.status === 'Exact' ? 'Exact match' : m.status === 'Suggested' || m.status === 'Confirmed' ? 'Automatic suggestion' : 'Choose…'}</option>
           ${options.map(o => `<option value="${esc(o[0])}" ${STATE.cm360.mapping[m.key] === o[0] ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}
           <option value="none" ${STATE.cm360.mapping[m.key] === 'none' ? 'selected' : ''}>No CM360 activity (not used)</option>
-        </select>${m.activityName && !STATE.cm360.mapping[m.key] ? '<span class="sub">Suggested: ' + esc(m.activityName) + '</span>' : ''}`}</td>
+        </select>${m.activityName && !STATE.cm360.mapping[m.key] ? '<span class="sub">' + (m.status === 'Exact' ? 'Activity: ' : 'Suggested: ') + esc(m.activityName) + '</span>' : ''}`}
+        ${m.reason ? '<span class="sub">' + esc(m.reason) + '</span>' : ''}
+        ${m.disagree ? '<span class="sub"><span class="sev Medium">Check</span> The tag name and the activity describe different things</span>' : ''}</td>
       <td>${m.conversions === null ? '—' : ga4Num_(m.conversions)}</td>
-      <td><span class="sev ${m.status === 'Confirmed' ? 'OK' : m.status === 'Not matched' ? 'Medium' : 'Info'}">${esc(m.status)}</span></td></tr>`).join('')}
+      <td><span class="sev ${m.status === 'Confirmed' || m.status === 'Exact' ? 'OK' : m.status === 'Not matched' || m.status === 'Not in CM360' ? 'Medium' : 'Info'}">${esc(m.status)}</span></td></tr>`).join('')}
     </tbody></table></div>`;
 }
 
@@ -2291,7 +2294,13 @@ function cm360DeliveryTable(r) {
 
 function cm360TabHtml(r, tab) {
   if (tab === 'mapping') {
-    return `<p class="lede">Each Floodlight tag in GTM, matched to a CM360 activity by name. Confirm or correct the matches; your choices are saved with the audit.</p>${cm360MappingTable(r)}`;
+    const exact = STATE.cm360.data && Array.isArray(STATE.cm360.data.setup);
+    return `<p class="lede">${exact ? 'Each Floodlight tag in GTM, matched exactly to its CM360 activity on the tag strings (type/cat).'
+        : 'Each Floodlight tag in GTM, matched to a CM360 activity by name.'} Confirm or correct the matches; your choices are saved with the audit.</p>
+      ${exact ? '' : `<div class="notice">Matching by name is a guess. For exact matching on the tag strings, ${Google.hasScope(CM360_TRAFFIC_SCOPE)
+        ? '<button class="link" data-act="cm360-setup">read the Floodlight setup</button>.'
+        : 'connect the CM360 Floodlight setup (edit-level permission; the app only reads Floodlight activities): <button class="link" data-act="cm360-exact-connect">Connect Floodlight setup</button>.'}</div>`}
+      ${cm360MappingTable(r)}`;
   }
   if (tab === 'activities') return `<p class="lede">Floodlight activities of configuration DC-${esc(r.configId)} and their conversions in the last 30 days.</p>${cm360ActivitiesTable(r)}`;
   if (tab === 'delivery') return `<p class="lede">CM360 clicks per campaign compared with GA4 sessions for the same campaign, last 30 days.</p>${cm360DeliveryTable(r)}`;
@@ -2358,8 +2367,8 @@ function exportCm360Csv(kind) {
   const r = STATE.cm360.result;
   const slug = 'cm360-' + fileSlug();
   if (kind === 'mapping') {
-    download(slug + '-floodlight-mapping.csv', toCsv([['GTM tag', 'Where', 'type', 'cat', 'Counting method', 'Variables', 'CM360 activity', 'Conversions (30 days)', 'Match']]
-      .concat(r.mappingRows.map(m => [m.labels.join('; '), m.where.join('; '), m.type, m.cat, m.method, m.uVars.join(' '), m.activityName, m.conversions === null ? '' : m.conversions, m.status]))), 'text/csv');
+    download(slug + '-floodlight-mapping.csv', toCsv([['GTM tag', 'Where', 'type', 'cat', 'Counting method', 'Variables', 'CM360 activity', 'Conversions (30 days)', 'Match', 'Why']]
+      .concat(r.mappingRows.map(m => [m.labels.join('; '), m.where.join('; '), m.type, m.cat, m.method, m.uVars.join(' '), m.activityName, m.conversions === null ? '' : m.conversions, m.status, m.reason || '']))), 'text/csv');
   } else if (kind === 'delivery') {
     download(slug + '-delivery.csv', toCsv([['Campaign', 'Campaign ID', 'Impressions', 'Clicks', 'GA4 campaign', 'GA4 sessions', 'Sessions per click (%)']]
       .concat(r.delivery.map(d => [d.campaign, d.campaignId, d.impressions, d.clicks, d.ga4Campaign, d.sessions === null ? '' : d.sessions, d.ratio === null ? '' : d.ratio]))), 'text/csv');
@@ -3025,6 +3034,23 @@ document.addEventListener('click', async e => {
         Google.signInRedirect(googleClientId(), STATE.view, [CM360_SCOPE]);
         break;
       case 'cm360-run': await runCm360Reports(); break;
+      case 'cm360-exact-connect':
+        if (!stashForSignIn()) break;
+        Google.signInRedirect(googleClientId(), STATE.view, [CM360_TRAFFIC_SCOPE]);
+        break;
+      case 'cm360-setup': {
+        const c = STATE.cm360;
+        if (!c.data) break;
+        el.disabled = true; el.textContent = 'Reading the Floodlight setup…';
+        try {
+          const pid = c.data.profileId || c.profileId;
+          if (!pid) throw new Error('Run the CM360 check again to read the Floodlight setup.');
+          c.data.setup = await cm360FloodlightSetup(pid, c.data.configId);
+          computeCm360Result();
+          toast('Matched exactly: ' + c.data.setup.length + ' Floodlight activities read');
+        } finally { renderCm360(); }
+        break;
+      }
       case 'ads-connect':
         saveAppSettings({ adsDevToken: $('#ads-token').value.trim(), adsLoginId: $('#ads-login').value.trim() });
         if (!stashForSignIn()) break;

@@ -158,12 +158,36 @@ async function cm360PrepareCrossCheck(profileId, configId, progress) {
       return cm360PrepareReport(profileId, deliveryBody('advertiserId'), progress, 'Delivery');
     }
   };
-  const [floodlight, del, catalog] = await Promise.all([
+  const exact = Google.hasScope(CM360_TRAFFIC_SCOPE);
+  const [floodlight, del, catalog, setup] = await Promise.all([
     cm360PrepareReport(profileId, floodlightBody, progress, 'Floodlight'),
     delivery(),
-    cm360Activities(profileId, configId).catch(() => [])
+    cm360Activities(profileId, configId).catch(() => []),
+    exact ? cm360FloodlightSetup(profileId, configId).catch(e => { progress && progress('Floodlight setup could not be read (' + e.message + '); matching by name instead.', true); return null; })
+          : Promise.resolve(null)
   ]);
-  return { profileId: profileId, configId: String(configId), metrics: metrics, floodlight: floodlight, delivery: del, catalog: catalog };
+  if (setup) progress && progress('Floodlight setup read: ' + setup.length + ' activit(ies) with their tag strings, for exact matching.');
+  return { profileId: profileId, configId: String(configId), metrics: metrics, floodlight: floodlight, delivery: del, catalog: catalog, setup: setup };
+}
+
+/**
+ * Floodlight activities of a configuration with their exact tag strings (type = group tag string,
+ * cat = activity tag string). Needs the dfatrafficking permission; only this read is ever sent.
+ */
+async function cm360FloodlightSetup(profileId, configId) {
+  const out = [];
+  let token = '';
+  do {
+    const res = await Google.get(CM360_API + 'userprofiles/' + profileId + '/floodlightActivities?floodlightConfigurationId=' +
+      encodeURIComponent(configId) + '&maxResults=1000' + (token ? '&pageToken=' + encodeURIComponent(token) : ''));
+    (res.floodlightActivities || []).forEach(a => out.push({
+      id: String(a.id), name: a.name || '', group: a.floodlightActivityGroupName || '',
+      type: String(a.floodlightActivityGroupTagString || '').toLowerCase(), cat: String(a.tagString || '').toLowerCase(),
+      method: a.countingMethod || '', status: a.status || '', uVars: (a.userDefinedVariableTypes || []).map(v => String(v).toLowerCase())
+    }));
+    token = res.nextPageToken || '';
+  } while (token && out.length < 20000);
+  return out;
 }
 
 // ── Report files ─────────────────────────────────────────────────────
@@ -262,6 +286,34 @@ function cm360MatchScore_(tag, activity) {
   return score;
 }
 
+/** Why a suggestion was made, in a few words ("tag string + 2 words"). */
+function cm360MatchReason_(tag, activity) {
+  const a = new Set(cm360Tokens_(tag.labels.join(' ') + ' ' + tag.cat + ' ' + tag.type));
+  const b = new Set(cm360Tokens_(activity.name + ' ' + (activity.group || '')));
+  let hit = 0;
+  a.forEach(t => { if (b.has(t)) hit++; });
+  const cat = cm360Compact_(tag.cat).replace(/\d+$/, '');
+  const prefix = cat.length >= 4 && cm360Compact_(activity.name).indexOf(cat) === 0;
+  return [prefix ? 'activity name starts like the tag string' : '', hit ? hit + ' word' + (hit === 1 ? '' : 's') + ' in common' : ''].filter(Boolean).join(' + ');
+}
+
+/** CM360 counting method in GTM's terms (STANDARD, UNIQUE, SESSION, TRANSACTIONS, ITEM_SOLD). */
+function cm360Method_(m) {
+  const s = String(m || '').toUpperCase().replace(/_COUNTING$/, '').replace(/^ITEMS_SOLD$/, 'ITEM_SOLD').replace(/^PER_SESSION$/, 'SESSION');
+  return s === 'ITEMS' ? 'ITEM_SOLD' : s;
+}
+
+const CM360_VISIT_WORDS = /\b(visit|visits|page|pageview|view|views|landing|lp|homepage)\b/i;
+const CM360_SALE_WORDS = /\b(purchase|purchases|sale|sales|order|orders|transaction|transactions|checkout|confirmation|thank|thanks|buy|bought)\b/i;
+
+/** True when a GTM tag name and its CM360 activity describe different things (a page visit vs a purchase). */
+function cm360NamesDisagree_(tagName, activityName) {
+  const t = String(tagName || ''), a = String(activityName || '');
+  const tv = CM360_VISIT_WORDS.test(t) && !CM360_SALE_WORDS.test(t), ts = CM360_SALE_WORDS.test(t) && !CM360_VISIT_WORDS.test(t);
+  const av = CM360_VISIT_WORDS.test(a) && !CM360_SALE_WORDS.test(a), as = CM360_SALE_WORDS.test(a) && !CM360_VISIT_WORDS.test(a);
+  return (tv && as) || (ts && av);
+}
+
 /** GTM Floodlight tags grouped by src/type/cat, from a serialised GTM result. */
 function cm360GtmTags(result) {
   if (!result || !result.audit || !Array.isArray(result.audit.floodlightTags)) return [];
@@ -298,6 +350,8 @@ function buildCm360Result(data, gtmTags, ga4, mapping, meta) {
   // Activities: report rows (with conversions) plus the catalogue (all known activities)
   const acts = new Map();
   (data.catalog || []).forEach(a => { if (a.id || a.name) acts.set(a.id || a.name, { id: a.id, name: a.name, group: '', conversions: 0, clickThrough: null, viewThrough: null }); });
+  const setup = Array.isArray(data.setup) ? data.setup : null;   // exact tag strings (dfatrafficking), when read
+  (setup || []).forEach(a => { if (!acts.has(a.id)) acts.set(a.id, { id: a.id, name: a.name, group: a.group, conversions: 0, clickThrough: null, viewThrough: null }); });
   (data.activities || []).forEach(a => {
     const k = a.id || a.name;
     acts.set(k, Object.assign(acts.get(k) || {}, a));
@@ -318,12 +372,20 @@ function buildCm360Result(data, gtmTags, ga4, mapping, meta) {
 
   // ── Floodlight vs GTM (only tags for the chosen configuration) ──
   const local = gtmTags.filter(t => t.src === String(data.configId));
+  const setupByTag = new Map((setup || []).map(a => [a.type + '/' + a.cat, a]));
   const rows = local.map(t => {
-    const scored = activities.map(a => ({ a: a, s: cm360MatchScore_(t, a) })).sort((x, y) => y.s - x.s);
-    const best = scored[0] && scored[0].s >= 0.5 ? scored[0].a : null;
     const confirmed = mapping[t.key];
-    const chosen = confirmed === 'none' ? null : confirmed ? byId.get(confirmed) || null : best;
-    return { tag: t, activity: chosen, status: confirmed ? (confirmed === 'none' ? 'No CM360 activity' : 'Confirmed') : best ? 'Suggested' : 'Not matched',
+    const exact = setup ? setupByTag.get(String(t.type).toLowerCase() + '/' + String(t.cat).toLowerCase()) || null : null;
+    const scored = setup ? [] : activities.map(a => ({ a: a, s: cm360MatchScore_(t, a) })).sort((x, y) => y.s - x.s);
+    const best = scored[0] && scored[0].s >= 0.5 ? scored[0].a : null;
+    const auto = setup ? (exact ? byId.get(exact.id) || null : null) : best;
+    const chosen = confirmed === 'none' ? null : confirmed ? byId.get(confirmed) || null : auto;
+    const status = confirmed ? (confirmed === 'none' ? 'No CM360 activity' : 'Confirmed')
+      : setup ? (exact ? 'Exact' : 'Not in CM360') : best ? 'Suggested' : 'Not matched';
+    const reason = status === 'Exact' ? 'Same tag string (' + exact.type + '/' + exact.cat + ')'
+      : status === 'Not in CM360' ? 'No activity with tag string ' + t.type + '/' + t.cat + ' in this configuration'
+      : status === 'Suggested' ? 'Suggested by name: ' + cm360MatchReason_(t, best) : status === 'Confirmed' ? 'Chosen by the analyst' : '';
+    return { tag: t, activity: chosen, status: status, exact: exact, reason: reason,
              suggestions: scored.slice(0, 5).filter(x => x.s > 0).map(x => x.a) };
   });
   const usedIds = new Set(rows.filter(r => r.activity).map(r => r.activity.id || r.activity.name));
@@ -332,6 +394,37 @@ function buildCm360Result(data, gtmTags, ga4, mapping, meta) {
     add('Floodlight vs GTM', 'Medium', dead.length + ' Floodlight tag(s) in GTM whose activity recorded no conversions in 30 days',
         'Check the trigger fires on the right page and the tag waits for consent correctly; remove tags that are no longer used',
         dead.map(r => r.tag.labels[0] + ' → ' + r.activity.name));
+  }
+  if (setup) {
+    const missing = rows.filter(r => r.status === 'Not in CM360');
+    if (missing.length) {
+      add('Floodlight vs GTM', 'Medium', missing.length + ' Floodlight tag(s) in GTM send to a tag string with no activity in DC-' + data.configId,
+          'CM360 does not record these hits: the activity was deleted or the tag has a typo in type/cat. Fix the tag or remove it',
+          missing.map(r => r.tag.labels[0] + ' (' + r.tag.type + '/' + r.tag.cat + ')'));
+    }
+    const inactive = rows.filter(r => r.exact && r.exact.status && !/^ACTIVE$/i.test(r.exact.status));
+    if (inactive.length) {
+      add('Floodlight vs GTM', 'Medium', inactive.length + ' Floodlight tag(s) in GTM fire to an activity that is not active in CM360',
+          'Remove the tag from GTM, or reactivate the activity if it is still needed', inactive.map(r => r.tag.labels[0] + ' → ' + r.exact.name + ' (' + r.exact.status.toLowerCase().replace(/_/g, ' ') + ')'));
+    }
+    const methods = rows.filter(r => r.exact && r.tag.method && r.exact.method && cm360Method_(r.tag.method) !== cm360Method_(r.exact.method));
+    if (methods.length) {
+      add('Floodlight vs GTM', 'Low', methods.length + ' Floodlight tag(s) use a different counting method from their CM360 activity',
+          'Set the tag\'s counting method to the one the activity uses, so conversions are counted as planned',
+          methods.map(r => r.tag.labels[0] + ': GTM ' + cm360Method_(r.tag.method).toLowerCase() + ', CM360 ' + cm360Method_(r.exact.method).toLowerCase()));
+    }
+    const vars = rows.filter(r => r.exact && r.exact.uVars && (r.tag.uVars || []).some(u => r.exact.uVars.indexOf(String(u).toLowerCase()) < 0));
+    if (vars.length) {
+      add('Floodlight vs GTM', 'Low', vars.length + ' Floodlight tag(s) send custom variables their CM360 activity does not collect',
+          'Add the variables to the activity in CM360 (or remove them from the tag); until then their values are dropped',
+          vars.map(r => r.tag.labels[0] + ': ' + r.tag.uVars.filter(u => r.exact.uVars.indexOf(String(u).toLowerCase()) < 0).join(', ')));
+    }
+  }
+  const disagree = rows.filter(r => r.activity && r.status !== 'Confirmed' && cm360NamesDisagree_(r.tag.labels.join(' '), r.activity.name));
+  if (disagree.length) {
+    add('Floodlight vs GTM', setup ? 'Medium' : 'Low', disagree.length + ' Floodlight tag(s) whose GTM name and CM360 activity describe different things (page visit vs purchase)',
+        'Check each tag\'s trigger: a page-visit tag recording into a purchase activity inflates conversions. If the trigger is right, rename the tag',
+        disagree.map(r => r.tag.labels[0] + ' → ' + r.activity.name));
   }
   const unmatched = rows.filter(r => r.status === 'Not matched');
   if (unmatched.length) {
@@ -428,7 +521,9 @@ function buildCm360Result(data, gtmTags, ga4, mapping, meta) {
     },
     issues: sorted, areas: areas, score: { score: score, grade: score >= 90 ? 'A' : score >= 75 ? 'B' : score >= 60 ? 'C' : score >= 40 ? 'D' : 'E' },
     mappingRows: rows.map(r => ({ key: r.tag.key, labels: r.tag.labels, where: r.tag.where, type: r.tag.type, cat: r.tag.cat,
-      method: r.tag.method, uVars: r.tag.uVars, status: r.status, activityId: r.activity ? r.activity.id || r.activity.name : '',
+      method: r.tag.method, uVars: r.tag.uVars, status: r.status, reason: r.reason, cmMethod: r.exact ? cm360Method_(r.exact.method) : '',
+      disagree: !!(r.activity && r.status !== 'Confirmed' && cm360NamesDisagree_(r.tag.labels.join(' '), r.activity.name)),
+      activityId: r.activity ? r.activity.id || r.activity.name : '',
       activityName: r.activity ? r.activity.name : '', conversions: r.activity ? r.activity.conversions : null,
       suggestions: r.suggestions.map(a => a.id || a.name) })),
     activities: activities.map(a => ({ id: a.id, name: a.name, group: a.group || '', conversions: a.conversions || 0,
@@ -438,7 +533,8 @@ function buildCm360Result(data, gtmTags, ga4, mapping, meta) {
     ga4Source: ga4 ? ga4.source : null,
     coverage: [
       'Last 30 days. Conversions from the CM360 Floodlight report; impressions and clicks from a standard report for the advertiser that owns Floodlight configuration ' + data.configId + '.',
-      'GTM tags are matched to CM360 activities by name, because the reports-only permission cannot read the activities\' tag strings (cat/type). Confirm or correct the matches in the Floodlight mapping tab.',
+      setup ? 'GTM tags are matched exactly on their tag strings (type/cat), read from the Floodlight setup of configuration ' + data.configId + '.'
+        : 'GTM tags are matched to CM360 activities by name, because the reports-only permission cannot read the activities\' tag strings (type/cat). Connect "CM360 Floodlight setup" for exact matching, or confirm the matches in the Floodlight mapping tab.',
       ga4 ? 'Clicks are compared with GA4 sessions per campaign (matched by campaign name, from ' + ga4.source + '). Search campaigns are left out.'
           : 'GA4 was not compared: run the GA4 audit for this site first.',
       'Report files were downloaded manually and read in this browser; only the counts above are kept. The temporary reports were deleted from CM360.'

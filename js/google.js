@@ -13,8 +13,10 @@ const GOOGLE_SCOPES = [
 // Optional permissions, requested only when the user turns on a feature that needs them
 const CM360_SCOPE = 'https://www.googleapis.com/auth/dfareporting';   // CM360 reports (no campaign/Floodlight edits)
 const GSC_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';   // Search Console, read only
+// CM360 Floodlight setup for exact tag matching. Edit-level permission; the app only reads Floodlight activities.
+const CM360_TRAFFIC_SCOPE = 'https://www.googleapis.com/auth/dfatrafficking';
 const ADS_SCOPE = 'https://www.googleapis.com/auth/adwords';   // Google Ads (no read-only scope exists; the app only reads)
-const GOOGLE_OPTIONAL_SCOPES = [CM360_SCOPE, GSC_SCOPE];
+const GOOGLE_OPTIONAL_SCOPES = [CM360_SCOPE, GSC_SCOPE, CM360_TRAFFIC_SCOPE];
 const GOOGLE_SESSION_KEY = 'tas.googleSession';           // sessionStorage: { token, expires, user }
 const GOOGLE_HINT_KEY = 'tas.googleHint';                 // localStorage: last account, suggested at sign-in
 const EMAIL_SCOPE = 'https://www.googleapis.com/auth/userinfo.email';

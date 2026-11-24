@@ -128,6 +128,43 @@ test('analyst mapping overrides the suggestion and is reflected in issues', () =
   assert.equal(none.mappingRows.find(m => m.key === key).status, 'No CM360 activity');
 });
 
+test('exact matching on tag strings from the Floodlight setup, with setup findings', () => {
+  const tags = g('cm360GtmTags')(gtmResult());
+  const setup = [
+    // bookt0: same tag string, counting method differs, u1 not collected
+    { id: '9001', name: 'Book Test Drive', group: 'Leads', type: 'leads0', cat: 'bookt0', method: 'UNIQUE_COUNTING', status: 'ACTIVE', uVars: ['u2'] },
+    // broch0: name says "Purchase", the GTM tag says "Brochure Download" → no name clash (download is neither visit nor sale)
+    { id: '9002', name: 'Brochure Download', group: 'Leads', type: 'leads0', cat: 'broch0', method: 'STANDARD_COUNTING', status: 'ARCHIVED', uVars: [] },
+    // an activity whose name does not resemble any GTM tag
+    { id: '9010', name: 'Completely Different Name', group: 'Leads', type: 'leads0', cat: 'other0', method: 'STANDARD_COUNTING', status: 'ACTIVE', uVars: [] }
+    // confi0 is missing: deleted or a typo
+  ];
+  const r = g('buildCm360Result')(cmData({ setup: setup }), tags, ga4, {}, {});
+  const row = cat => r.mappingRows.find(m => m.cat === cat);
+  assert.equal(row('bookt0').status, 'Exact');
+  assert.equal(row('bookt0').activityName, 'Book Test Drive');
+  assert.match(row('bookt0').reason, /Same tag string \(leads0\/bookt0\)/);
+  assert.equal(row('confi0').status, 'Not in CM360', 'name suggestion is not used when the setup is known');
+  assert.ok(has(r, 'Medium', 'Floodlight vs GTM', /1 Floodlight tag\(s\) in GTM send to a tag string with no activity/));
+  assert.ok(has(r, 'Medium', 'Floodlight vs GTM', /fire to an activity that is not active/), 'archived activity');
+  assert.ok(has(r, 'Low', 'Floodlight vs GTM', /different counting method/));
+  assert.ok(has(r, 'Low', 'Floodlight vs GTM', /custom variables their CM360 activity does not collect/));
+  assert.ok(!has(r, 'Low', 'Floodlight vs GTM', /not matched to a CM360 activity/), 'no "not matched" with exact matching');
+  assert.match(r.coverage.join(' '), /matched exactly on their tag strings/);
+  // The analyst can still override an exact match
+  const over = g('buildCm360Result')(cmData({ setup: setup }), tags, ga4, { [row('confi0').key]: '9010' }, {});
+  assert.equal(over.mappingRows.find(m => m.cat === 'confi0').status, 'Confirmed');
+});
+
+test('names that describe different things are flagged (page visit vs purchase)', () => {
+  const disagree = g('cm360NamesDisagree_');
+  assert.equal(disagree('Floodlight - Gadget Page Visit', 'Gadget Purchase (first time)'), true);
+  assert.equal(disagree('Floodlight - One Time Gadget Purchase', 'Gadget One Time Purchase'), false);
+  assert.equal(disagree('FL - Brochure Download', 'Brochure Download'), false);
+  assert.equal(g('cm360Method_')('ITEMS_SOLD_COUNTING'), 'ITEM_SOLD');
+  assert.equal(g('cm360Method_')('SESSION_COUNTING'), 'SESSION');
+});
+
 test('without GTM or GA4: those areas are not checked; clean data gives no issues', () => {
   const r = g('buildCm360Result')(cmData(), [], null, {}, {});
   assert.equal(r.areas.find(a => a.area === 'Floodlight vs GTM').status, 'Not checked');

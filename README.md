@@ -229,7 +229,15 @@ The **Overview** shows each report's grade, the high and medium actions across a
 - Activities that record conversions but have no tag in the container.
 - CM360 clicks compared with GA4 sessions per campaign: campaigns with no GA4 sessions, or fewer than half as many sessions as clicks. This needs the GA4 audit for the same site. Search campaigns are left out.
 
-**Matching:** with reports-only access, CM360 doesn't return the activities' tag strings (`type`/`cat`). GTM tags are therefore matched to activities by name. Confirm or correct each match in the **Floodlight mapping** tab; your choices are saved with the audit.
+**Matching:**
+- **Exact (optional):** connect **CM360 Floodlight setup** (Settings → Connections, or the link in the Floodlight mapping tab). The app then reads the configuration's Floodlight activities with their tag strings (`type`/`cat`) and matches every GTM tag exactly. This is the edit-level `dfatrafficking` permission; the app only ever reads Floodlight activities. With it, the check also reports:
+  - GTM tags whose `type/cat` has no activity (deleted, or a typo: CM360 records nothing)
+  - tags firing to inactive activities
+  - a different counting method from the activity
+  - custom variables (`u1`…) the activity doesn't collect
+- **By name (without that permission):** reports-only access doesn't return the tag strings, so GTM tags are matched to activities by name. Each suggestion says why it was made (for example "activity name starts like the tag string + 2 words in common").
+
+Either way, tags whose name and activity describe different things (a page visit recorded into a purchase activity) are flagged. Confirm or correct each match in the **Floodlight mapping** tab; your choices are saved with the audit.
 
 ### Optional local browser runner
 
