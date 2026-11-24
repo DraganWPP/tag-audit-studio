@@ -129,35 +129,85 @@ function googleClientId() {
   return (loadAppSettings().googleClientId || '').trim() || APP_CONFIG.googleClientId;
 }
 
+const RENEW_WARN_MINUTES = 5;
+
+/** "ends in 4 min" when the sign-in is about to run out, else ''. */
+function endsSoon(session) {
+  const m = session.minutesLeft();
+  return session.isSignedIn() && m < RENEW_WARN_MINUTES ? 'ends in ' + (m < 1 ? 'under a minute' : m + ' min') : '';
+}
+
 function googleStatusHtml() {
   if (Google.isSignedIn()) {
+    const soon = endsSoon(Google);
     return `<span class="signed">Signed in${Google.user ? ' as <span class="account">' + esc(Google.user) + '</span>' : ' to Google'}</span>
+      ${soon ? `<span class="hint" style="margin:0">Sign-in ${soon}.</span> <button class="link" data-act="renew">Renew now</button>` : ''}
       <button class="link" data-act="signout">Sign out</button>`;
   }
-  return (Google.hasExpired() ? '<span class="hint" style="margin:0">Your Google sign-in has expired (it lasts an hour).</span> ' : '') +
-    `<button class="btn secondary" data-act="signin">${Google.hasExpired() ? 'Sign in again' : 'Sign in with Google'}</button>`;
+  return Google.hasExpired()
+    ? `<span class="hint" style="margin:0">Your Google sign-in${Google.user ? ' (' + esc(Google.user) + ')' : ''} has ended (it lasts an hour).</span>
+       <button class="btn secondary" data-act="signin">Renew sign-in</button>`
+    : '<button class="btn secondary" data-act="signin">Sign in with Google</button>';
+}
+
+/** Short names of the extra permissions the main sign-in has. */
+function connectedExtras() {
+  return [[GSC_SCOPE, 'Search Console'], [CM360_SCOPE, 'CM360']].filter(x => (Google.scopes || []).indexOf(x[0]) >= 0).map(x => x[1]);
 }
 
 function updateGoogleStatus() {
   const el = $('#rail-google');
   if (!el) return;
-  el.innerHTML = (Google.isSignedIn()
-    ? `<span class="rail-signed" title="${esc(Google.user || 'Signed in to Google')}">Google: ${esc(Google.user || 'signed in')}</span>
-       <button class="link" data-act="signout">Sign out</button>`
-    : `<button class="link" data-act="signin">${Google.hasExpired() ? 'Google sign-in expired: sign in again' : 'Sign in with Google'}</button>`) +
-    (GoogleAds.isSignedIn()
-      ? `<span class="rail-signed" title="${esc(GoogleAds.user || 'Signed in to Google Ads')}">Google Ads: ${esc(GoogleAds.user || 'signed in')}</span>
-         <button class="link" data-act="ads-signout">Sign out of Google Ads</button>` : '');
+  const line = (session, label, signinAct, signoutAct) => {
+    if (session.isSignedIn()) {
+      const soon = endsSoon(session);
+      return `<span class="rail-signed" title="${esc(session.user || label)}">${esc(label)}: ${esc(session.user || 'signed in')}</span>
+        ${soon ? `<span class="rail-warn">${esc(soon)} · <button class="link" data-act="${signinAct === 'signin' ? 'renew' : 'ads-renew'}">Renew</button></span>` : ''}
+        <button class="link" data-act="${signoutAct}">Sign out${session === GoogleAds ? ' of Google Ads' : ''}</button>`;
+    }
+    if (session.hasExpired()) return `<button class="link" data-act="${signinAct}">${esc(label)} sign-in expired: renew</button>`;
+    return session === Google ? '<button class="link" data-act="signin">Sign in with Google</button>' : '';
+  };
+  const extras = Google.isSignedIn() ? connectedExtras() : [];
+  el.innerHTML = line(Google, 'Google', 'signin', 'signout') +
+    (extras.length ? `<span class="rail-extra">Also: ${esc(extras.join(', '))}</span>` : '') +
+    line(GoogleAds, 'Google Ads', 'ads-connect', 'ads-signout');
 }
 
 /** The Google Ads sign-in control (a separate Google account is allowed). */
 function adsStatusHtml() {
   if (GoogleAds.hasScope(ADS_SCOPE)) {
+    const soon = endsSoon(GoogleAds);
     return `<span class="signed">Google Ads: signed in${GoogleAds.user ? ' as <span class="account">' + esc(GoogleAds.user) + '</span>' : ''}</span>
+      ${soon ? `<span class="hint" style="margin:0">Sign-in ${soon}.</span> <button class="link" data-act="ads-renew">Renew now</button>` : ''}
       <button class="link" data-act="ads-signout">Sign out</button>`;
   }
-  return (GoogleAds.hasExpired() ? '<span class="hint" style="margin:0">The Google Ads sign-in has expired (it lasts an hour).</span> ' : '') +
-    '<button class="btn secondary" data-act="ads-connect">Sign in for Google Ads</button>';
+  return GoogleAds.hasExpired()
+    ? `<span class="hint" style="margin:0">The Google Ads sign-in${GoogleAds.user ? ' (' + esc(GoogleAds.user) + ')' : ''} has ended (it lasts an hour).</span>
+       <button class="btn secondary" data-act="ads-connect">Renew Google Ads sign-in</button>`
+    : '<button class="btn secondary" data-act="ads-connect">Sign in for Google Ads</button>';
+}
+
+/** Settings → Connections: every Google account and permission in one place. */
+function connectionsHtml() {
+  const signed = Google.isSignedIn();
+  const row = (name, what, status, action) => `<tr><th scope="row">${name}<span class="sub">${what}</span></th><td>${status}</td><td>${action}</td></tr>`;
+  const ok = t => `<span class="sev OK">${t}</span>`;
+  const extra = (scope, act) => !signed ? '<span class="sub">Sign in first</span>'
+    : Google.hasScope(scope) ? ok('Connected') : `<button class="btn secondary" data-act="${act}">Connect</button>`;
+  return `<div class="table-wrap"><table class="kv connections">
+    <tbody>
+      ${row('Google account', 'GTM and GA4, read only', signed ? ok('Signed in') + (Google.user ? '<span class="sub">' + esc(Google.user) + '</span>' : '') + (endsSoon(Google) ? '<span class="sub">' + esc(endsSoon(Google)) + '</span>' : '')
+        : Google.hasExpired() ? '<span class="sev Medium">Ended</span>' : 'Not signed in',
+        signed ? '<button class="link" data-act="renew">Renew</button> · <button class="link" data-act="signout">Sign out</button>'
+          : `<button class="btn secondary" data-act="signin">${Google.hasExpired() ? 'Renew sign-in' : 'Sign in with Google'}</button>`)}
+      ${row('Search Console', 'Same account, read only. Asked for when first used', extra(GSC_SCOPE, 'gsc-connect'), '')}
+      ${row('CM360', 'Same account, reports only. Asked for when first used', extra(CM360_SCOPE, 'cm360-connect'), '')}
+      ${row('Google Ads', 'Its own Google account (can be different). Needs a developer token below', GoogleAds.hasScope(ADS_SCOPE)
+          ? ok('Signed in') + (GoogleAds.user ? '<span class="sub">' + esc(GoogleAds.user) + '</span>' : '') : GoogleAds.hasExpired() ? '<span class="sev Medium">Ended</span>' : 'Not signed in',
+        GoogleAds.hasScope(ADS_SCOPE) ? '<button class="link" data-act="ads-renew">Renew</button> · <button class="link" data-act="ads-signout">Sign out</button>'
+          : `<button class="btn secondary" data-act="ads-connect">${GoogleAds.hasExpired() ? 'Renew sign-in' : 'Sign in for Google Ads'}</button>`)}
+    </tbody></table></div>`;
 }
 
 /**
@@ -1537,6 +1587,20 @@ function renderSettings() {
     <p class="lede">Stored only in this browser. Nothing is sent anywhere except the AI provider and Google when you use them.</p>
 
     <section class="form-block">
+      <h2 style="margin-top:0">Connections</h2>
+      ${connectionsHtml()}
+      <p class="hint">Each sign-in lasts an hour and is kept in this browser tab only; closing the tab signs you out. The left bar warns 5 minutes before the end:
+        <strong>Renew</strong> goes to Google and straight back without asking again, as long as you're still signed in to Google in this browser. Permissions you connected are kept.</p>
+      <details class="advanced">
+        <summary>Advanced: use a different OAuth client</summary>
+        <label for="set-client" style="margin-top:10px">OAuth client ID override</label>
+        <input type="text" id="set-client" value="${esc(s.googleClientId || '')}" placeholder="${esc(APP_CONFIG.googleClientId)}">
+        <p class="hint">Leave empty to use the built-in client. A different client needs this page's address (${esc(location.origin + location.pathname)}) as an authorised redirect URI in Google Cloud. See the README.</p>
+        <div class="actions"><button class="btn secondary" data-act="save-google">Save override</button></div>
+      </details>
+    </section>
+
+    <section class="form-block">
       <h2 style="margin-top:0">AI assistant</h2>
       <div class="grid2">
         <div><label for="set-provider">Provider</label>
@@ -1551,19 +1615,6 @@ function renderSettings() {
       </div>
       <p class="hint">The key is kept in this browser's local storage and sent only to the provider. Use a personal or restricted key, and don't use this on shared computers.</p>
       <div class="actions"><button class="btn" data-act="save-ai">Save</button><button class="btn secondary" data-act="test-ai">Test connection</button></div>
-    </section>
-
-    <section class="form-block">
-      <h2 style="margin-top:0">Google sign-in</h2>
-      <div class="row">${googleStatusHtml()}</div>
-      <p class="hint">Read-only access to Tag Manager and Analytics. The sign-in lasts an hour and is kept in this browser tab only; closing the tab signs you out.</p>
-      <details class="advanced">
-        <summary>Advanced: use a different OAuth client</summary>
-        <label for="set-client" style="margin-top:10px">OAuth client ID override</label>
-        <input type="text" id="set-client" value="${esc(s.googleClientId || '')}" placeholder="${esc(APP_CONFIG.googleClientId)}">
-        <p class="hint">Leave empty to use the built-in client. A different client needs this page's address (${esc(location.origin + location.pathname)}) as an authorised redirect URI in Google Cloud. See the README.</p>
-        <div class="actions"><button class="btn secondary" data-act="save-google">Save override</button></div>
-      </details>
     </section>
 
     <section class="form-block">
@@ -2958,11 +3009,17 @@ document.addEventListener('click', async e => {
         break;
       case 'goto': setView(el.dataset.view); break;
       case 'signin':
-      case 'signin-redirect': {
+      case 'signin-redirect':
+      case 'renew': {
         if (!stashForSignIn()) break;
-        Google.signInRedirect(googleClientId(), STATE.view);
+        if (act === 'renew') Google.signInRedirect(googleClientId(), STATE.view, [], { silent: true });
+        else Google.renewOrSignIn(googleClientId(), STATE.view);
         break;
       }
+      case 'ads-renew':
+        if (!stashForSignIn()) break;
+        GoogleAds.signInRedirect(googleClientId(), STATE.view, [ADS_SCOPE], { silent: true });
+        break;
       case 'cm360-connect':
         if (!stashForSignIn()) break;
         Google.signInRedirect(googleClientId(), STATE.view, [CM360_SCOPE]);
@@ -2971,7 +3028,7 @@ document.addEventListener('click', async e => {
       case 'ads-connect':
         saveAppSettings({ adsDevToken: $('#ads-token').value.trim(), adsLoginId: $('#ads-login').value.trim() });
         if (!stashForSignIn()) break;
-        GoogleAds.signInRedirect(googleClientId(), STATE.view, [ADS_SCOPE]);
+        GoogleAds.renewOrSignIn(googleClientId(), STATE.view, [ADS_SCOPE]);
         break;
       case 'ads-signout': GoogleAds.signOut(); toast('Signed out of Google Ads'); VIEWS[STATE.view](); updateGoogleStatus(); break;
       case 'ads-test':
@@ -3191,7 +3248,25 @@ window.addEventListener('google-session-changed', () => {
   if (['audit', 'ga4', 'gsc', 'settings', 'overview'].indexOf(STATE.view) >= 0 && !STATE.running && !STATE.ga4.running && !STATE.gsc.running) VIEWS[STATE.view]();
 });
 setView(oauthReturn ? oauthReturn.view : (location.hash || '#audit').slice(1));
-if (oauthReturn) toast(oauthReturn.error || (oauthReturn.session === 'ads' ? 'Signed in for Google Ads' : 'Signed in to Google'), !!oauthReturn.error);
+if (oauthReturn && oauthReturn.retry) {
+  // Google needs the user (signed out of Chrome, or a new permission): continue with the normal sign-in
+  const session = oauthReturn.retry === 'ads' ? GoogleAds : Google;
+  if (stashForSignIn()) session.signInRedirect(googleClientId(), oauthReturn.view, session === GoogleAds ? [ADS_SCOPE] : []);
+}
+// Warn before a sign-in ends, and say once when it has ended (renewing stays the user's choice)
+const signinWarned = { main: false, ads: false };
+setInterval(() => {
+  updateGoogleStatus();
+  [[Google, 'main', 'Google'], [GoogleAds, 'ads', 'Google Ads']].forEach(([s, k, label]) => {
+    if (s.hasExpired() && !signinWarned[k]) {
+      signinWarned[k] = true;
+      toast('Your ' + label + ' sign-in has ended. Renew it in the left bar (no new approval needed).', true);
+      if (['settings', 'audit', 'ga4', 'gsc', 'cm360'].indexOf(STATE.view) >= 0 && !STATE.running && !(STATE.auto && STATE.auto.running)) VIEWS[STATE.view]();
+    }
+    if (s.isSignedIn()) signinWarned[k] = false;
+  });
+}, 30000);
+if (oauthReturn && !oauthReturn.retry) toast(oauthReturn.error || (oauthReturn.session === 'ads' ? 'Signed in for Google Ads' : 'Signed in to Google'), !!oauthReturn.error);
 // Back from "Connect CM360" during an automatic run: carry on with the CM360 step
 if (oauthReturn && !oauthReturn.error && STATE.auto && STATE.auto.steps.some(s => s.status === 'connect')) {
   autoContinue().then(() => { if (STATE.view === 'overview') renderOverview(); });

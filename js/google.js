@@ -39,17 +39,22 @@ function createGoogleSession(cfg) {
   restore() {
     let s = null;
     try { s = JSON.parse(sessionStorage.getItem(this.cfg.sessionKey) || 'null'); } catch (e) { /* storage blocked */ }
-    if (s && s.token && Date.now() < s.expires) {
-      this.token = s.token; this.expires = s.expires; this.user = s.user || null; this.scopes = s.scopes || [];
-    }
+    if (!s) return;
+    // After the hour the token is dropped, but the account and permissions are kept, so renewing
+    // asks Google for the same permissions (CM360, Search Console) without connecting them again.
+    this.token = s.token && Date.now() < s.expires ? s.token : null;
+    this.expires = s.expires || 0; this.user = s.user || null; this.scopes = s.scopes || [];
   },
+
+  /** Whole minutes left on the current sign-in (0 when signed out or expired). */
+  minutesLeft() { return this.isSignedIn() ? Math.max(0, Math.floor((this.expires - Date.now()) / 60000)) : 0; },
 
   /** True when the current sign-in includes this permission (e.g. CM360 reporting). */
   hasScope(scope) { return this.isSignedIn() && (this.scopes || []).indexOf(scope) >= 0; },
 
   persist() {
     try {
-      if (this.token) sessionStorage.setItem(this.cfg.sessionKey, JSON.stringify({ token: this.token, expires: this.expires, user: this.user, scopes: this.scopes || [] }));
+      if (this.token || this.expires) sessionStorage.setItem(this.cfg.sessionKey, JSON.stringify({ token: this.token, expires: this.expires, user: this.user, scopes: this.scopes || [] }));
       else sessionStorage.removeItem(this.cfg.sessionKey);
     } catch (e) { /* storage blocked: the sign-in lasts until the page reloads */ }
   },
@@ -64,24 +69,29 @@ function createGoogleSession(cfg) {
    * "Authorised redirect URIs" in Google Cloud. Once access is approved, Google
    * sends the user straight back; the last account used is suggested (login_hint).
    */
-  signInRedirect(clientId, returnView, extraScopes) {
-    if (!clientId) throw new Error('No Google OAuth client ID is set up. See Settings → Google sign-in.');
+  signInRedirect(clientId, returnView, extraScopes, opts) {
+    if (!clientId) throw new Error('No Google OAuth client ID is set up. See Settings → Connections.');
+    opts = opts || {};
     const state = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('');
-    sessionStorage.setItem('tas.oauth', JSON.stringify({ state, view: returnView || 'audit', session: this.cfg.name }));
+    sessionStorage.setItem('tas.oauth', JSON.stringify({ state, view: returnView || 'audit', session: this.cfg.name, silent: !!opts.silent }));
     const params = new URLSearchParams({
       client_id: clientId,
       redirect_uri: this.redirectUri(),
       response_type: 'token',
       // Extra permissions (CM360) are only requested when a feature asks for them; keep any granted earlier this tab
-      scope: [this.cfg.scopes].concat(extraScopes || [], (this.scopes || []).filter(s => this.cfg.optional.indexOf(s) >= 0)).join(' '),
+      scope: Array.from(new Set(this.cfg.scopes.split(' ').concat(extraScopes || [],
+        (this.scopes || []).filter(s => this.cfg.optional.indexOf(s) >= 0)))).join(' '),
       include_granted_scopes: 'true',
       state
     });
     let hint = '';
     try { hint = localStorage.getItem(this.cfg.hintKey) || ''; } catch (e) { /* ignore */ }
     if (hint) params.set('login_hint', hint);
-    // The Google Ads sign-in may use a different Google account: always let the user choose
-    if (this.cfg.chooseAccount && !this.isSignedIn()) params.set('prompt', 'select_account');
+    // Renewal: no Google screen at all when the account is still signed in and has approved before.
+    // If Google needs the user, it returns an error and the app falls back to the normal sign-in.
+    if (opts.silent) params.set('prompt', 'none');
+    // The Google Ads sign-in may use a different Google account: let the user choose (not when renewing)
+    else if (this.cfg.chooseAccount && !this.hasExpired()) params.set('prompt', 'select_account');
     location.assign('https://accounts.google.com/o/oauth2/v2/auth?' + params);
   },
 
@@ -115,7 +125,13 @@ function createGoogleSession(cfg) {
     try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* ignore */ }
     const view = saved && saved.view || 'audit';
     if (!saved || p.get('state') !== saved.state) return { view, error: 'Google sign-in could not be verified (state mismatch). Try again.' };
-    if (p.get('error')) return { view, error: 'Google sign-in failed: ' + p.get('error') };
+    if (p.get('error')) {
+      // A silent renewal Google could not complete without the user: start the normal sign-in
+      if (saved.silent && /interaction_required|login_required|consent_required|account_selection_required/.test(p.get('error'))) {
+        return { view, retry: saved.session === 'ads' ? 'ads' : 'main' };
+      }
+      return { view, error: 'Google sign-in failed: ' + p.get('error') };
+    }
     const target = saved.session === 'ads' ? GoogleAds : Google;
     target.token = p.get('access_token');
     target.expires = Date.now() + (Number(p.get('expires_in') || 3600) - 60) * 1000;
@@ -123,6 +139,11 @@ function createGoogleSession(cfg) {
     target.scopes = (p.get('scope') || '').split(/\s+/).filter(Boolean);
     target.persist();
     return { view, session: target.cfg.name };
+  },
+
+  /** Starts a renewal (expired sign-in) or a normal sign-in. */
+  renewOrSignIn(clientId, returnView, extraScopes) {
+    this.signInRedirect(clientId, returnView, extraScopes, { silent: this.hasExpired() && !!this.user });
   },
 
   /** Ends the sign-in in this tab and asks Google to revoke the token. */
