@@ -55,6 +55,19 @@ function ga4Host_(url) {
 }
 
 function ga4Pct_(part, total) { return total ? Math.round(part / total * 1000) / 10 : 0; }
+
+/** Custom dimension fill: events that send the parameter, and how often it is empty on those events.
+ *  Older saved audits only have total/notSet over all events (measured: false). */
+function ga4DimFill_(x) {
+  if (!Array.isArray(x.sentWith)) {
+    return { param: x.param, scope: x.scope, measured: false, total: x.total, notSet: x.notSet,
+             noData: !x.total || x.notSet / x.total >= 0.99 };
+  }
+  const events = x.sentWith.slice().sort((a, b) => b.withValue - a.withValue);
+  const sentTotal = events.reduce((s, e) => s + e.count, 0);
+  return { param: x.param, scope: x.scope, measured: true, total: x.total, notSet: x.notSet, withValue: x.withValue,
+           events: events, sentTotal: sentTotal, emptyWhereSent: Math.max(sentTotal - x.withValue, 0), noData: !x.withValue };
+}
 function ga4Num_(n) { return Number(n || 0).toLocaleString('en-GB'); }
 function ga4Enum_(v) { return v ? String(v).toLowerCase().replace(/_/g, ' ') : '—'; }
 function ga4YesNo_(v) { return v === true ? 'Yes' : v === false ? 'No' : '—'; }
@@ -236,10 +249,17 @@ function buildGa4Result(d, gtm, meta) {
       }
     });
     if (Array.isArray(D.dimFill)) {
-      const empty = D.dimFill.filter(x => !x.total || x.notSet / x.total >= 0.99);
+      const fills = D.dimFill.map(ga4DimFill_);
+      const empty = fills.filter(f => f.noData);
       if (empty.length) {
         add('Custom definitions', 'Low', empty.length + ' custom dimension(s) registered but receive no data',
-            'Check the parameter is still sent with that exact name, or archive the dimension', empty.map(x => x.param));
+            'Check the parameter is still sent with that exact name, or archive the dimension', empty.map(f => f.param));
+      }
+      const gaps = fills.filter(f => f.measured && f.scope === 'EVENT' && f.sentTotal >= 100 && f.emptyWhereSent / f.sentTotal >= 0.5);
+      if (gaps.length) {
+        add('Custom definitions', 'Low', gaps.length + ' custom dimension(s) empty on half or more of the events that send them',
+            'Check the tags for these events: the parameter is set on some firings and missing on others (variable undefined, wrong data layer key or timing)',
+            gaps.map(f => f.param + ' (' + ga4Pct_(f.emptyWhereSent, f.sentTotal) + '% empty on ' + f.events.map(e => e.name).slice(0, 3).join(', ') + ')'));
       }
     }
     if (gtmRelevant) {
@@ -521,8 +541,18 @@ function ga4QualitySections_(D, totalEvents, totalSessions) {
     ] });
   }
   if (Array.isArray(D.dimFill) && D.dimFill.length) {
-    out.push({ title: 'Custom dimension fill rate', columns: ['Parameter', 'Scope', 'Events', 'Empty ("(not set)")'],
-      rows: D.dimFill.map(x => [x.param, ga4Enum_(x.scope), ga4Num_(x.total), x.total ? ga4Pct_(x.notSet, x.total) + '%' : '—']) });
+    const fills = D.dimFill.map(ga4DimFill_);
+    if (fills.every(f => f.measured)) {
+      out.push({ title: 'Custom dimension fill rate', columns: ['Parameter', 'Scope', 'Sent with', 'Events with a value', 'Empty where sent'],
+        wrap: 2, note: '"Empty where sent" counts only the events that carry the parameter at least once, so a form parameter is not marked empty on page views.',
+        rows: fills.map(f => [f.param, ga4Enum_(f.scope),
+          f.events.length ? f.events.slice(0, 3).map(e => e.name).join(', ') + (f.events.length > 3 ? ' +' + (f.events.length - 3) + ' more' : '') : 'No events',
+          ga4Num_(f.withValue), f.sentTotal ? ga4Pct_(f.emptyWhereSent, f.sentTotal) + '%' : '—']) });
+    } else {
+      // Audits saved before the per-event breakdown: empty share is over all events
+      out.push({ title: 'Custom dimension fill rate', columns: ['Parameter', 'Scope', 'All events', 'Empty across all events'],
+        rows: fills.map(f => [f.param, ga4Enum_(f.scope), ga4Num_(f.total), f.total ? ga4Pct_(f.notSet, f.total) + '%' : '—']) });
+    }
   }
   if (Array.isArray(D.piiPages) && D.piiPages.length) {
     out.push({ title: 'Page URLs that may contain personal data (masked)', columns: ['URL (masked)', 'Views'],

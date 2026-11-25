@@ -168,8 +168,9 @@ details.rules .rule { display: grid; grid-template-columns: 260px minmax(0,1fr);
 .tally strong { font-size: 1.5rem; color: var(--ink); display: block; line-height: 1.1; }
 
 /* Highlighter: marks only what needs action */
-.hl-mark { background: linear-gradient(104deg, transparent .4em, var(--hl) .4em, var(--hl) calc(100% - .3em), transparent calc(100% - .3em));
-  background-size: 100% 62%; background-position: 0 88%; background-repeat: no-repeat; color: inherit; padding: 0 .2em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+/* Dark ink on the yellow in both themes (inherited light text was unreadable in dark mode) */
+.hl-mark { background: var(--hl); color: var(--hl-ink); padding: .05em .3em; border-radius: 3px;
+  box-decoration-break: clone; -webkit-box-decoration-break: clone; }
 
 /* ── Tables ──────────────────────────────────────────────────────── */
 .table-wrap { position: relative; overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }

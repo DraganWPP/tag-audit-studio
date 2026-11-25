@@ -1947,9 +1947,9 @@ function ga4KvTable(section) {
 }
 
 function ga4DataTable(section) {
-  return `<h3>${esc(section.title)}</h3>${section.rows.length ? `<div class="table-wrap"><table>
+  return `<h3>${esc(section.title)}</h3>${section.note ? '<p class="hint">' + esc(section.note) + '</p>' : ''}${section.rows.length ? `<div class="table-wrap"><table>
     <thead><tr>${section.columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>
-    <tbody>${section.rows.map(r => `<tr>${r.map((c, n) => `<td${n === 0 ? ' class="wrap"' : ''}>${n === 0 && /URL/.test(section.title) ? '<code>' + esc(c) + '</code>' : esc(c)}</td>`).join('')}</tr>`).join('')}</tbody>
+    <tbody>${section.rows.map(r => `<tr>${r.map((c, n) => `<td${n === 0 || section.wrap === n ? ' class="wrap"' : ''}>${n === 0 && /URL/.test(section.title) ? '<code>' + esc(c) + '</code>' : esc(c)}</td>`).join('')}</tr>`).join('')}</tbody>
   </table></div>` : '<p class="hint">No data.</p>'}`;
 }
 
