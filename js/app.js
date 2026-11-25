@@ -1946,9 +1946,9 @@ function ga4KvTable(section) {
 }
 
 function ga4DataTable(section) {
-  return `<h3>${esc(section.title)}</h3>${section.rows.length ? `<div class="table-wrap"><table>
+  return `<h3>${esc(section.title)}</h3>${section.note ? '<p class="hint">' + esc(section.note) + '</p>' : ''}${section.rows.length ? `<div class="table-wrap"><table>
     <thead><tr>${section.columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>
-    <tbody>${section.rows.map(r => `<tr>${r.map((c, n) => `<td${n === 0 ? ' class="wrap"' : ''}>${n === 0 && /URL/.test(section.title) ? '<code>' + esc(c) + '</code>' : esc(c)}</td>`).join('')}</tr>`).join('')}</tbody>
+    <tbody>${section.rows.map(r => `<tr>${r.map((c, n) => `<td${n === 0 || section.wrap === n ? ' class="wrap"' : ''}>${n === 0 && /URL/.test(section.title) ? '<code>' + esc(c) + '</code>' : esc(c)}</td>`).join('')}</tr>`).join('')}</tbody>
   </table></div>` : '<p class="hint">No data.</p>'}`;
 }
 
@@ -2259,7 +2259,7 @@ function cm360MappingTable(r, forPrint) {
       <td class="wrap"><strong>${esc(m.labels.join(', '))}</strong><span class="sub">${esc(m.where.join(', '))}${m.uVars.length ? ' · variables ' + esc(m.uVars.join(', ')) : ''}</span></td>
       <td><code>${esc(m.type)}/${esc(m.cat)}</code>${m.method ? '<span class="sub">' + esc(m.method) + '</span>' : ''}</td>
       <td class="wrap">${forPrint ? esc(m.activityName || '—') : `<label class="skip" for="map-${esc(m.key)}">CM360 activity for ${esc(m.labels[0])}</label>
-        <select id="map-${esc(m.key)}" data-cm360-map="${esc(m.key)}" style="width:auto;max-width:100%">
+        <select id="map-${esc(m.key)}" data-cm360-map="${esc(m.key)}" class="map-select">
           <option value="">${m.status === 'Suggested' || m.status === 'Confirmed' ? 'Automatic suggestion' : 'Choose…'}</option>
           ${options.map(o => `<option value="${esc(o[0])}" ${STATE.cm360.mapping[m.key] === o[0] ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}
           <option value="none" ${STATE.cm360.mapping[m.key] === 'none' ? 'selected' : ''}>No CM360 activity (not used)</option>

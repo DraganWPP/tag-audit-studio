@@ -719,11 +719,15 @@ async function fetchGa4Full(prop, progress) {
     };
   }
 
-  // How often each custom dimension is empty
+  // How often each custom dimension is filled: events WITH a value, per event name (no values are read).
+  // The empty share is then measured only over the events that send the parameter, not over every event.
   const dims = (admin.customDimensions || []).filter(x => x.scope === 'EVENT' || x.scope === 'USER').slice(0, 25);
   if (dims.length && b1) {
-    const reqs = dims.map(x => R([(x.scope === 'USER' ? 'customUser:' : 'customEvent:') + x.parameterName], ['eventCount'],
-      { metricAggregations: ['TOTAL'], orderBys: desc('eventCount') }));
+    const eventTotals = new Map((data.events || []).map(e => [e.name, e.count]));
+    const allEvents = (data.events || []).reduce((s, e) => s + e.count, 0);
+    const reqs = dims.map(x => R(['eventName'], ['eventCount'], {
+      dimensionFilter: { notExpression: exact((x.scope === 'USER' ? 'customUser:' : 'customEvent:') + x.parameterName, '(not set)') },
+      orderBys: desc('eventCount') }));
     const chunks = [];
     for (let i = 0; i < reqs.length; i += 5) chunks.push(reqs.slice(i, i + 5));
     const reports = await soft('Collected data: custom dimension fill rates',
@@ -731,11 +735,11 @@ async function fetchGa4Full(prop, progress) {
     if (reports) {
       reports.forEach(note);
       data.dimFill = dims.map((x, i) => {
-        const rows = ga4ReportRows_(reports[i]);
-        const total = ga4ReportTotal_(reports[i]);
-        const notSet = (rows.find(r => r.d[0] === '(not set)') || { m: [0] }).m[0];
-        return { param: x.parameterName, scope: x.scope,
-                 total: total === null ? rows.reduce((s, r) => s + r.m[0], 0) : total, notSet: notSet };
+        const sentWith = ga4ReportRows_(reports[i]).map(r => ({ name: r.d[0], withValue: r.m[0],
+          count: Math.max(eventTotals.get(r.d[0]) || 0, r.m[0]) }));
+        const withValue = sentWith.reduce((s, e) => s + e.withValue, 0);
+        return { param: x.parameterName, scope: x.scope, total: allEvents, notSet: Math.max(allEvents - withValue, 0),
+                 withValue: withValue, sentWith: sentWith };
       });
     }
   }
