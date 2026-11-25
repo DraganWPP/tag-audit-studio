@@ -83,17 +83,9 @@ The concept is an "inspection report":
 
 Good next step: add these fixtures under `tests/` with a Playwright script (`npx playwright test`).
 
-## Live findings so far (Omoda UK, omodaauto.co.uk)
+## Client notes
 
-The live site uses **GTM-WMTL9BKM**, GA4 **G-NHCZDNK9XQ** and **G-1B2T1Q5T3F**, and Google Ads **AW-11503056335**, with **Cookiebot** as the CMP.
-- An earlier Sheet scan showed GTM-5ZT4J2M. That was probably an old Wayback copy.
-- Live consent test (from a UK session):
-  - Consent Mode v2 defaults are all denied.
-  - Google tags send cookieless pings only (`gcs=G100`).
-  - Meta, TikTok, LinkedIn and Amazon wait for consent.
-  - **Microsoft Clarity sends data before any choice AND after Deny.** It sets no cookies in those states.
-  - **Samba TV fires before any choice** and stops after Deny.
-  - Udesk chat, Driftrock and cdn.sanity.io load regardless of consent.
+Findings from real client audits go in `CLAUDE.local.md` (git-ignored, loaded automatically by Claude Code). The repo is public: keep client names, sites and IDs out of commits, PRs, tests and docs.
 
 ## Open ideas / backlog
 
