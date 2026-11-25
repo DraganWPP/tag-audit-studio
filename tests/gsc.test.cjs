@@ -34,8 +34,8 @@ test('property matching: Domain first, subdomains covered, other domains not', (
 
 test('page keys match GA4 landing pages; personal data masked; verification tags counted', () => {
   const k = g('gscPathKey_');
-  assert.equal(k('https://www.example.co.uk/Models/Omoda-5/?utm_source=x#top'), '/models/omoda-5');
-  assert.equal(k('/models/omoda-5'), '/models/omoda-5');
+  assert.equal(k('https://www.example.co.uk/Products/Gadget-5/?utm_source=x#top'), '/products/gadget-5');
+  assert.equal(k('/products/gadget-5'), '/products/gadget-5');
   assert.equal(k('https://www.example.co.uk/'), '/');
   assert.equal(k('/thanks/someone@example.com'), '/thanks/[email]');
   const tags = g('gscVerificationTags')('<meta name="google-site-verification" content="aaa"><meta content="bbb" name=\'google-site-verification\'>' +
@@ -50,7 +50,7 @@ function data(over) {
     start: '2026-10-24', end: '2026-11-20', totals: { clicks: 10000, impressions: 400000, position: 9.1 }, pagesComplete: true,
     pages: [
       { host: 'www.example.co.uk', protocol: 'https', path: '/', clicks: 6000, impressions: 100000 },
-      { host: 'www.example.co.uk', protocol: 'https', path: '/models/omoda-5', clicks: 2500, impressions: 90000 },
+      { host: 'www.example.co.uk', protocol: 'https', path: '/products/gadget-5', clicks: 2500, impressions: 90000 },
       { host: 'www.example.co.uk', protocol: 'https', path: '/finance', clicks: 900, impressions: 30000 },
       { host: 'www.example.co.uk', protocol: 'https', path: '/tiny', clicks: 5, impressions: 300 },
       { host: 'example.co.uk', protocol: 'http', path: '/old-page', clicks: 400, impressions: 9000 },
@@ -65,7 +65,7 @@ function data(over) {
 }
 const ga4 = { source: 'Example - GA4', organic: { total: 4000, complete: true, pages: [
   { host: 'www.example.co.uk', path: '/', sessions: 3000 },
-  { host: 'www.example.co.uk', path: '/models/omoda-5', sessions: 1000 },
+  { host: 'www.example.co.uk', path: '/products/gadget-5', sessions: 1000 },
   { host: 'other-site.com', path: '/finance', sessions: 999 }   // another host: not counted for this site
 ] } };
 const has = (r, sev, area, re) => r.issues.some(i => i.severity === sev && i.area === area && re.test(i.finding));
@@ -85,9 +85,9 @@ test('check engine: sitemaps, hosts and search vs GA4 findings', () => {
   assert.ok(!missing.items.some(x => /tiny/.test(x)), 'pages under 20 clicks are not flagged');
   assert.ok(has(r, 'Low', 'Property & access', /2 Search Console verification tags/));
   assert.ok(!has(r, 'Low', 'Property & access', /Only URL-prefix/), 'Domain property exists');
-  const omoda = r.pages.find(p => p.path === '/models/omoda-5');
-  assert.equal(omoda.sessions, 1000);
-  assert.equal(omoda.ratio, 40);
+  const gadget = r.pages.find(p => p.path === '/products/gadget-5');
+  assert.equal(gadget.sessions, 1000);
+  assert.equal(gadget.ratio, 40);
   assert.equal(r.summary.ga4Sessions, 4000);
   assert.ok(r.areas.every(a => a.score !== null));
 });

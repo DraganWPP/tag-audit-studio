@@ -597,7 +597,7 @@ function renderAudit() {
     <section class="form-block" aria-labelledby="client-h">
       <h2 id="client-h" style="margin-top:0">Client</h2>
       <div class="grid2">
-        <div><label for="in-client">Client name</label><input type="text" id="in-client" value="${esc(i.client)}" placeholder="e.g. Omoda UK"></div>
+        <div><label for="in-client">Client name</label><input type="text" id="in-client" value="${esc(i.client)}" placeholder="e.g. Example Retail UK"></div>
         <div><label for="in-site">Website</label><input type="url" id="in-site" value="${esc(i.site)}" placeholder="https://www.example.co.uk"></div>
       </div>
     </section>
@@ -2008,7 +2008,7 @@ function renderGa4Start() {
     <section class="form-block">
       <h2 style="margin-top:0">Client</h2>
       <div class="grid2">
-        <div><label for="ga4-client">Client name</label><input type="text" id="ga4-client" value="${esc(i.client)}" placeholder="e.g. Omoda UK"></div>
+        <div><label for="ga4-client">Client name</label><input type="text" id="ga4-client" value="${esc(i.client)}" placeholder="e.g. Example Retail UK"></div>
         <div><label for="ga4-site">Website</label><input type="url" id="ga4-site" value="${esc(i.site)}" placeholder="https://www.example.co.uk"></div>
       </div>
       <p class="hint">Used to check hostnames, self-referrals and that the stream URL matches the site.</p>

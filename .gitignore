@@ -10,3 +10,4 @@ exports/
 node_modules/
 runner-results/
 *.runner.json
+CLAUDE.local.md
