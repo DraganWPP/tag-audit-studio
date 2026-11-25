@@ -57,7 +57,8 @@ function cleanData() {
       sources: [{ source: 'google', sessions: 3000 }, { source: '(direct)', sessions: 1000 }],
       landingNotSet: 10,
       purchases: { events: 50, ids: 50, notSet: 0, duplicateIds: 0, revenue: 5000, ecommercePurchases: 50 },
-      piiPages: [], dimFill: [{ param: 'form_name', scope: 'EVENT', total: 120, notSet: 0 }], realtime: 12
+      piiPages: [], dimFill: [{ param: 'form_name', scope: 'EVENT', total: 13170, notSet: 13050, withValue: 120,
+                   sentWith: [{ name: 'generate_lead', withValue: 120, count: 120 }] }], realtime: 12
     },
     unavailable: []
   };
@@ -139,6 +140,35 @@ test('problem property: each check fires at the right severity', () => {
   assert.equal(r.issues.length, expect.length, findings(r).join('\n'));
   assert.equal(r.issues[0].severity, 'High', 'High issues sort first');
   assert.ok(r.score.score < 75);
+});
+
+test('custom dimension fill rate is measured over the events that send the parameter', () => {
+  const d = cleanData();
+  d.data.dimFill = [
+    // Sent only on generate_lead and always filled: mostly "(not set)" across all events, but not a problem
+    { param: 'form_name', scope: 'EVENT', total: 13170, notSet: 13050, withValue: 120,
+      sentWith: [{ name: 'generate_lead', withValue: 120, count: 120 }] },
+    // Sent on page_view but filled on only 2,000 of 10,000
+    { param: 'page_type', scope: 'EVENT', total: 13170, notSet: 11170, withValue: 2000,
+      sentWith: [{ name: 'page_view', withValue: 2000, count: 10000 }] },
+    { param: 'old_param', scope: 'EVENT', total: 13170, notSet: 13170, withValue: 0, sentWith: [] }
+  ];
+  const r = buildGa4Result(d, ga4GtmContext(gtmResult()), { site: 'https://www.example.co.uk' });
+  const gap = r.issues.find(i => /empty on half or more of the events that send them/.test(i.finding));
+  assert.ok(gap, findings(r).join(' | '));
+  assert.equal(gap.items.length, 1);
+  assert.match(gap.items[0], /^page_type \(80% empty on page_view\)/);
+  assert.ok(has(r, 'Low', 'Custom definitions', /^1 custom dimension\(s\) registered but receive no data/));
+  const table = r.quality.find(t => t.title === 'Custom dimension fill rate');
+  assert.equal(table.columns[4], 'Empty where sent');
+  assert.equal(JSON.stringify(table.rows[0]), JSON.stringify(['form_name', 'event', 'generate_lead', '120', '0%']));
+  assert.equal(table.rows[1][4], '80%');
+  assert.equal(table.rows[2][2], 'No events');
+  // An audit saved before this change still shows the old, all-events view
+  d.data.dimFill = [{ param: 'form_name', scope: 'EVENT', total: 120, notSet: 30 }];
+  const old = buildGa4Result(d, ga4GtmContext(gtmResult()), {}).quality.find(t => t.title === 'Custom dimension fill rate');
+  assert.equal(old.columns[3], 'Empty across all events');
+  assert.equal(old.rows[0][3], '25%');
 });
 
 test('event cross-reference statuses', () => {
