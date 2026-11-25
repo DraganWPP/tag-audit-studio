@@ -92,6 +92,7 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 table.connections th { width: 40%; }
 table.connections th .sub { display: block; font-weight: 400; margin-top: 2px; }
 table.connections td { vertical-align: middle; }
+.map-select { width: 100%; max-width: 340px; }
 .signed .account { font-family: var(--mono); font-weight: 500; font-size: .85rem; }
 details.advanced { margin-top: 14px; }
 details.advanced > summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
@@ -178,7 +179,6 @@ th { text-align: left; font-weight: 600; color: var(--muted); font-size: .82rem;
 td { padding: 10px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
 tr:last-child td { border-bottom: 0; }
 td.wrap { min-width: 220px; }
-.map-select { width: 100%; max-width: 340px; }
 td .sub { color: var(--muted); font-size: .84rem; display: block; margin-top: 2px; }
 .sev { display: inline-block; font-size: .78rem; font-weight: 600; padding: 1px 8px; border-radius: 10px; white-space: nowrap; }
 .sev.High { background: var(--high-bg); color: var(--high); }
