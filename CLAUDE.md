@@ -40,6 +40,10 @@ js/app.js           STATE, views (audit, overview, summary, consent, tags, ids, 
                     runFullAudit() (GTM → GA4 → Search Console → CM360 with STATE.auto run sheet; pauses for connect/downloads), runAudit()
                     pipeline, exports (PDF via window.print + #print-report, CSV, save/open audit JSON)
 css/app.css         design tokens, light/dark, print stylesheet
+runner/core.cjs     local Playwright runner (Node, not served): readContainer, coverage, runSession (3 consent contexts)
+runner/meta.cjs     Meta checker: metaTags (pixel ID/event/triggers from the export), metaEvent (pixel ID + event name
+                    only, from facebook.com/tr), metaCheck (per-tag result per consent state) → .runner.json `meta`;
+                    the app validates it in parseMetaCheck_ (engine-web.js) and renders metaCheckerHtml (app.js)
 ```
 
 **Run audit** calls `runFullAudit()`: it switches to the Overview, calls `runAudit({stay:true})` (which also runs the GA4 audit), then `autoContinue()` for the later steps (`AUTO_LATER_STEPS`: Search Console, CM360). Each has a blocker (skip reason or a missing scope); steps that need a scope pause at `connect` together and one redirect asks for all of them (`autoScopesNeeded`; `STATE.auto` is stashed and `autoContinue` resumes on return). CM360 then pauses at `waiting` (manual downloads + drop zone; `finishCm360` → `autoCm360Finished`). Combined client PDF = `combinedCoverHtml` + `clientReportHtml` for the GTM, GA4, Search Console (`gscClientReportModel`) and CM360 (`cm360ClientReportModel`) models.
@@ -71,7 +75,7 @@ The concept is an "inspection report":
 
 ## Testing
 
-`npm test` runs `tests/runner.test.cjs` (local runner + static app via Playwright) `tests/ga4.test.cjs` (GA4 audit engine on fixture Admin/Data API JSON, loaded in a `vm` context), `tests/cm360.test.cjs` (CM360 CSV parsing, Floodlight capture, matching) and `tests/gsc.test.cjs` (Search Console matching and check engine). What else was done during development:
+`npm test` runs `tests/runner.test.cjs` (local runner + static app via Playwright) `tests/ga4.test.cjs` (GA4 audit engine on fixture Admin/Data API JSON, loaded in a `vm` context), `tests/cm360.test.cjs` (CM360 CSV parsing, Floodlight capture, matching) and `tests/gsc.test.cjs` (Search Console matching and check engine) and `tests/meta.test.cjs` (Meta checker: export parsing, request capture in a real browser, per-tag results, import validation and the table). What else was done during development:
 - `npm run check` (`node --check` on every script).
 - An end-to-end Playwright run against a mocked network:
   - `gtm.js` served from a fixture compiled container, which has paused tags, trigger groups, rules, OneTrust gating and a hard-coded token

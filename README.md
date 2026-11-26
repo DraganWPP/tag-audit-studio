@@ -257,6 +257,12 @@ npm run runner -- --url https://example.com --export "C:\Audits\container.json"
 Import the generated `.runner.json` file under **Live consent test**. It includes
 vendor observations, action outcomes, event names and a tag coverage plan.
 Actions do not prove individual tags fired; confirm those in GTM Preview.
+
+**Meta checker:** for each Meta Pixel tag in the export, the runner checks whether
+Meta received the tag's event and pixel ID during the actions for its triggers, in
+each consent state (fired, not fired, different event or pixel, fired without
+consent). Only pixel IDs and event names are saved. See the
+[runner README](runner/README.md#meta-checker).
 Use only on authorised sites and avoid real purchases/leads. This first version
 uses no AI navigation and requires no hosted backend. Playwright is a local
 development dependency, not part of the static web app.

@@ -6,6 +6,7 @@ const readline = require('node:readline/promises');
 const { parseArgs } = require('node:util');
 const { chromium } = require('playwright');
 const { STAGES, websiteUrl, readContainer, coverage, runSession } = require('./core.cjs');
+const { metaCheck } = require('./meta.cjs');
 
 async function main() {
   const { values } = parseArgs({ options: {
@@ -26,6 +27,9 @@ async function main() {
   let browser;
   try {
     console.log('Local GTM-guided runner: ' + container.id + ' (' + container.tags.length + ' tags)');
+    if (container.meta.length) {
+      console.log('Meta checker: ' + container.meta.length + ' Meta Pixel tag(s). Select their triggers to check them.');
+    }
     console.log('Only test sites you are authorised to audit. Real actions can send real analytics/conversions.');
     console.log('No AI calls, automatic form filling, synthetic data-layer pushes or proof of individual tag firing.');
     if (await prompt('Type START to confirm permission and continue:') !== 'START') return;
@@ -53,7 +57,8 @@ async function main() {
     }
     console.log('\nThe same selected actions run in order in three fresh browser contexts.');
     console.log('Deny/Accept evidence starts after your choice, on a fresh page load. Before-choice requests are excluded.');
-    console.log('Only request hosts/status, cookie names and data-layer event names are saved, not URLs, bodies or cookie values.');
+    console.log('Only request hosts/status, cookie names, data-layer event names and Meta pixel IDs/event names are saved,');
+    console.log('not URLs, bodies, customer data or cookie values.');
     browser = await chromium.launch({ headless: false });
     const output = {
       tool: 'tag-audit-local-runner', v: 1, time: new Date().toISOString(),
@@ -66,6 +71,7 @@ async function main() {
       const { result, session } = await runSession({ browser, url, stage, actions, prompt });
       output.results.push(result);
       output.sessions.push(session);
+      if (container.meta.length) output.meta = metaCheck(container.meta, container.triggers, output.sessions);
       await fs.writeFile(out, JSON.stringify(output, null, 2), 'utf8');
     }
     console.log('\nSaved: ' + out + '\nImport this file under Live consent test in Tag Audit Studio.');
