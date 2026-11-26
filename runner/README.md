@@ -45,6 +45,32 @@ Results default to the ignored `runner-results` folder. Use
 are never overwritten at startup. Results are checkpointed after each completed
 scenario, so a failed later scenario leaves earlier results available.
 
+## Meta checker
+
+If the export contains Meta Pixel tags (Custom HTML with `fbq(...)`, or the
+Facebook Pixel template), the runner also checks each one:
+
+1. From the export it reads each tag's pixel ID, event name and firing triggers.
+   `{{Constant}}` variables are resolved; other variables are shown as
+   "set by a variable".
+2. While it runs, it notes each Meta Pixel event request (`facebook.com/tr`, GET
+   or POST) and which step sent it: the page load or one of your actions. Only
+   the **pixel ID** and **event name** are kept. Customer data (hashed or not),
+   custom data, page URLs and the request itself are never saved.
+3. For each tag and consent state it reports **Fired**, **Not fired**,
+   **Different event or pixel**, **Fired without consent**, **Blocked** or
+   **Not tested** (no completed action for its triggers). Page-load tags are
+   checked on the starting page load and on `visit` actions.
+
+Select the triggers of the Meta tags you want checked. The app shows the result
+in a Meta checker table under Live test results and adds an audit issue for tags
+that did not fire after Accept or sent a different event or pixel ID.
+
+Limits: Conversions API (server-side) events aren't visible; two tags sending the
+same event and pixel can't be told apart; Meta's automatic `Microdata` and
+`SubscribedButtonClick` events are ignored; a Meta event listed as "not linked to
+a tag" may come from the site's own code or another container.
+
 ## Evidence and limits
 
 - Vendor requests and cookie names use the same classifier as the console
@@ -52,7 +78,8 @@ scenario, so a failed later scenario leaves earlier results available.
 - The runner observes requests across main-page navigation and default
   `dataLayer.push` event names. It saves request hosts, methods, types, response
   status and failure state, not request paths, query strings, bodies, headers,
-  cookie values, or other data-layer fields. Consent signals are retained.
+  cookie values, or other data-layer fields. Consent signals are retained. The
+  Meta checker additionally keeps Meta pixel IDs and event names.
 - Raw request URLs exist only in memory to classify vendors and read `gcs`.
   Tag/trigger names, event names and site origins are still client data: inspect
   results before sharing them. There are no AI/provider calls.

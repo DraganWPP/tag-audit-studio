@@ -1439,6 +1439,7 @@ function runnerEvidence(stages) {
     <p class="hint">${esc(first.container.id)} ${esc(first.container.name)}.
       Actions are analyst-selected tests, not proof that individual GTM tags fired.
       Confirm exact firing in GTM Preview / Tag Assistant.</p>
+    ${first.meta ? metaCheckerHtml(first.meta) : ''}
     ${keys.map(k => {
       const s = stages[k].runner.session;
       const hosts = Array.from(new Set(s.requests.map(q => q.host)));
@@ -1458,6 +1459,38 @@ function runnerEvidence(stages) {
       <tbody>${first.coverage.map(t => `<tr><td>${tagMentions(esc(t.tag))}</td><td>${esc(t.status)}</td>
         <td>${tagMentions(esc(t.triggers.join(', ')))}</td><td>${tagMentions(esc(t.blockers.join(', ')))}</td></tr>`).join('')}</tbody>
     </table></div></details>`;
+}
+
+const META_STATUS_CLASS = { 'Fired without consent': 'High', 'Fires without consent': 'High',
+  Fired: 'OK', Blocked: 'OK', Working: 'OK', 'Not tested': 'Paused', Paused: 'Paused' };
+
+/** Meta checker table: did each Meta tag send its event, in each consent state. */
+function metaCheckerHtml(meta) {
+  const pill = t => `<span class="sev ${META_STATUS_CLASS[t] || 'Medium'}">${esc(t)}</span>`;
+  const hits = seen => seen.map(h => `${esc(h.event || 'No event name')} · <code>${esc(h.pixelId || 'no pixel ID')}</code>` +
+    (h.count > 1 ? ' ×' + h.count : '')).join('<br>');
+  const cell = st => st ? pill(st.status) + (st.seen.length ? `<span class="sub">${hits(st.seen)}</span>` : '') : '—';
+  const expected = (list, dynamic) => list.length ? list.map(esc).join(', ') + (dynamic ? ' (+ variable)' : '')
+    : dynamic ? 'Set by a variable' : 'Not readable';
+  return `<h3>Meta checker</h3>
+    <p class="hint">For each Meta Pixel tag in the export: did Meta receive its event and pixel ID during the actions for its
+      triggers? Only pixel IDs and event names were recorded. Server-side (Conversions API) events are not visible here,
+      and two tags sending the same event and pixel can't be told apart.</p>
+    ${meta.rows.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Tag</th><th>Expected pixel ID</th><th>Expected event</th>
+        ${Object.keys(LIVE_STAGES).map(k => `<th>${esc(LIVE_STAGES[k])}</th>`).join('')}<th>Result</th></tr></thead>
+      <tbody>${meta.rows.map(r => `<tr><td>${tagMentions(esc(r.tag))}<span class="sub">${tagMentions(esc(r.triggers.join(', ') || 'No firing triggers'))}</span></td>
+        <td>${r.pixelIds.length ? r.pixelIds.map(id => `<code>${esc(id)}</code>`).join('<br>') : r.dynamic ? 'Set by a variable' : 'Any (from the base pixel tag)'}</td>
+        <td>${expected(r.events, r.dynamic)}</td>
+        ${Object.keys(LIVE_STAGES).map(k => `<td>${cell(r.stages[k])}</td>`).join('')}
+        <td>${pill(r.verdict)}</td></tr>`).join('')}</tbody>
+    </table></div>` : '<p>No Meta Pixel tags were found in the export.</p>'}
+    ${meta.unlinked.length ? `<details><summary>Meta events not linked to a tag in this export</summary>
+      <p class="hint">Sent by the site, another container, or a tag whose event or pixel ID differs from its settings.</p>
+      <div class="table-wrap"><table><thead><tr><th>Consent state</th><th>During</th><th>Event</th><th>Pixel ID</th><th>Requests</th></tr></thead>
+      <tbody>${meta.unlinked.map(u => u.events.map(h => `<tr><td>${esc(LIVE_STAGES[u.stage])}</td><td>${tagMentions(esc(h.step))}</td>
+        <td>${esc(h.event || 'No event name')}</td><td><code>${esc(h.pixelId || '—')}</code></td><td>${h.count}</td></tr>`).join('')).join('')}</tbody>
+      </table></div></details>` : ''}`;
 }
 
 function renderLive() {

@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { metaTags, metaEvent, recordMetaEvent } = require('./meta.cjs');
 
 const engine = fs.readFileSync(path.join(__dirname, '..', 'js', 'engine.js'), 'utf8');
 const { snippet, builtIns } = vm.runInNewContext(engine +
@@ -43,7 +44,7 @@ function readContainer(text) {
   return {
     id: version.container && version.container.publicId || 'GTM export',
     name: version.container && version.container.name || '',
-    triggers, tags
+    triggers, tags, meta: metaTags(version, triggers)
   };
 }
 
@@ -75,8 +76,8 @@ async function runSession({ browser, url, stage, actions, prompt, settleMs = 150
   if (!STAGES.includes(stage)) throw new Error('Unknown consent stage: ' + stage);
   url = websiteUrl(url);
   const context = await browser.newContext({ serviceWorkers: 'block' });
-  const records = new Map(), events = new Set(), cookieNames = new Set(), errors = [];
-  let collecting = stage === 'before';
+  const records = new Map(), events = new Set(), cookieNames = new Set(), errors = [], meta = [];
+  let collecting = stage === 'before', step = 'load';
   let page;
   try {
     await context.exposeBinding('tasRunnerEvent', (source, name) => {
@@ -85,7 +86,11 @@ async function runSession({ browser, url, stage, actions, prompt, settleMs = 150
     await context.addInitScript(observeDataLayer);
     page = await context.newPage();
     context.on('request', request => {
-      if (collecting) records.set(request, {
+      if (!collecting) return;
+      // Meta checker: keep only the pixel ID and event name, tagged with the current step.
+      const hit = metaEvent(request.url(), request.method() === 'POST' ? request.postData() : null);
+      if (hit) recordMetaEvent(meta, step, hit);
+      records.set(request, {
         url: request.url(), host: new URL(request.url()).hostname,
         method: request.method(), resourceType: request.resourceType(), outcome: 'pending'
       });
@@ -125,8 +130,10 @@ async function runSession({ browser, url, stage, actions, prompt, settleMs = 150
     };
     await snapshot();
     const completed = [];
-    for (const action of actions) {
+    for (const [index, action] of actions.entries()) {
+      step = index;
       const result = { trigger: action.trigger, type: action.type, status: 'Completed' };
+      if (typeof action.triggerId === 'string') result.triggerId = action.triggerId;
       try {
         if (action.type === 'visit') {
           const target = websiteUrl(new URL(action.value, url).href);
@@ -179,7 +186,7 @@ async function runSession({ browser, url, stage, actions, prompt, settleMs = 150
       ({ host, method, resourceType, outcome, status }));
     return {
       result,
-      session: { stage, actions: completed, events: Array.from(events), requests, errors,
+      session: { stage, actions: completed, events: Array.from(events), requests, errors, meta,
         consentConfirmation: result.cmp ? 'Analyst confirmed; CMP state matched at capture' : 'Analyst confirmed; CMP not detected' }
     };
   } finally {

@@ -301,6 +301,7 @@ function parseRunnerResults_(text) {
         !list(t.blockers, 1000) || !t.blockers.every(str)) invalid();
     return { tag: t.tag, status: t.status, triggers: t.triggers, blockers: t.blockers };
   });
+  const meta = data.meta === undefined ? null : parseMetaCheck_(data.meta, invalid);
   const seen = new Set();
   let origin = null;
   return data.results.map(r => {
@@ -324,7 +325,7 @@ function parseRunnerResults_(text) {
     if (!list(s.actions, 1000) || !list(s.events, 10000) || !s.events.every(str) ||
         !list(s.requests, 100000) || !list(s.errors, 1000) || !s.errors.every(str) || !str(s.consentConfirmation)) invalid();
     const actions = s.actions.map(a => {
-      if (!a || !str(a.trigger) || !str(a.type) || !str(a.status)) invalid();
+      if (!a || !str(a.trigger) || !str(a.type) || !str(a.status) || (a.triggerId !== undefined && !str(a.triggerId))) invalid();
       return { trigger: a.trigger, type: a.type, status: a.status };
     });
     const requests = s.requests.map(q => {
@@ -334,10 +335,45 @@ function parseRunnerResults_(text) {
       return { host: q.host, method: q.method, resourceType: q.resourceType, outcome: q.outcome, status: q.status };
     });
     return Object.assign({}, r, { runner: {
-      container: { id: data.container.id, name: data.container.name }, coverage: coverage,
+      container: { id: data.container.id, name: data.container.name }, coverage: coverage, meta: meta,
       session: { actions: actions, events: s.events, requests: requests, errors: s.errors, consentConfirmation: s.consentConfirmation }
     } });
   });
+}
+
+const META_STATUSES = ['Fired', 'Fired without consent', 'Blocked', 'Not fired', 'Different event or pixel',
+  'Meta event seen', 'Not tested', 'Paused'];
+const META_VERDICTS = ['Working', 'Fires without consent', 'Not firing after Accept', 'Check event or pixel ID',
+  'Meta event seen; check the tag in GTM Preview', 'Not tested', 'Paused'];
+
+/** Validates the runner's Meta checker results (pixel IDs and event names only). */
+function parseMetaCheck_(m, invalid) {
+  const str = (v, max) => typeof v === 'string' && v.length <= (max || 2000);
+  const list = (v, max) => Array.isArray(v) && v.length <= max;
+  const pixel = v => v === null || (typeof v === 'string' && /^\d{10,20}$/.test(v));
+  const event = v => v === null || (typeof v === 'string' && /^[A-Za-z0-9_ .:-]{1,80}$/.test(v));
+  const count = v => Number.isInteger(v) && v > 0 && v < 1e6;
+  const hit = h => h && pixel(h.pixelId) && event(h.event) && count(h.count);
+  if (!m || !list(m.rows, 5000) || !list(m.unlinked, 3)) invalid();
+  const rows = m.rows.map(r => {
+    if (!r || !str(r.tag) || !list(r.pixelIds, 20) || !r.pixelIds.every(v => v !== null && pixel(v)) ||
+        !list(r.events, 20) || !r.events.every(v => v !== null && event(v)) || typeof r.dynamic !== 'boolean' ||
+        !list(r.triggers, 1000) || !r.triggers.every(v => str(v)) || META_VERDICTS.indexOf(r.verdict) < 0 ||
+        !r.stages || typeof r.stages !== 'object' || Array.isArray(r.stages)) invalid();
+    const stages = {};
+    Object.keys(r.stages).forEach(k => {
+      const st = r.stages[k];
+      if (!LIVE_STAGES[k] || !st || META_STATUSES.indexOf(st.status) < 0 || !list(st.seen, 20) || !st.seen.every(hit)) invalid();
+      stages[k] = { status: st.status, seen: st.seen.map(h => ({ pixelId: h.pixelId, event: h.event, count: h.count })) };
+    });
+    return { tag: r.tag, pixelIds: r.pixelIds.slice(), events: r.events.slice(), dynamic: r.dynamic,
+      triggers: r.triggers.slice(), stages: stages, verdict: r.verdict };
+  });
+  const unlinked = m.unlinked.map(u => {
+    if (!u || !LIVE_STAGES[u.stage] || !list(u.events, 200) || !u.events.every(h => hit(h) && str(h.step, 500))) invalid();
+    return { stage: u.stage, events: u.events.map(h => ({ step: h.step, pixelId: h.pixelId, event: h.event, count: h.count })) };
+  });
+  return { rows: rows, unlinked: unlinked };
 }
 
 /** Merges snippet results into stored live-test data (same shape the Apps Script used). */
@@ -378,6 +414,20 @@ function liveTestIssues_() {
       Object.keys(data.stages.before.vendors).some(v => /^(GA4|Google Ads|Floodlight)/.test(v))) {
     recordIssue_('Consent', 'High', 'Live test: Google tags load with no Consent Mode default',
                  'Set gtag("consent","default",{…denied}) before Google tags load', where);
+  }
+  const runner = Object.keys(LIVE_STAGES).map(s => data.stages[s] && data.stages[s].runner).filter(Boolean)[0];
+  const meta = runner && runner.meta;
+  if (meta) {
+    const tagsWith = verdict => meta.rows.filter(r => r.verdict === verdict).map(r => r.tag);
+    const notFiring = tagsWith('Not firing after Accept'), different = tagsWith('Check event or pixel ID');
+    if (notFiring.length) {
+      recordIssue_('Ads Setup', 'Medium', 'Meta checker: ' + notFiring.length + ' Meta tag(s) did not fire after Accept',
+                   'Check these tags\' triggers in GTM Preview, then re-run the local runner', where, notFiring);
+    }
+    if (different.length) {
+      recordIssue_('Ads Setup', 'Medium', 'Meta checker: ' + different.length + ' Meta tag(s) sent a different event or pixel ID',
+                   'Compare the event name and pixel ID in each tag with what Meta received', where, different);
+    }
   }
   const missing = Object.keys(LIVE_STAGES).filter(s => !data.stages[s]);
   if (missing.length) {
